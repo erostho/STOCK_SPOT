@@ -71,56 +71,108 @@ def cache_set(name, obj):
         pass
 
 # ============================================================
-# B1) LẤY DANH SÁCH <10K TỪ FIREANT (NHẸ)
+# B1) LẤY DANH SÁCH <10K TỪ SSI
 # ============================================================
-def get_tickers_under_10k_from_fireant():
+import pandas as pd
+import requests
+import time
+
+def get_tickers_under_10k_from_ssi():
     """
-    Lấy toàn thị trường từ FireAnt (endpoint ví dụ) -> lọc price < 10,000.
-    Bạn cần chỉnh endpoint/params theo token & tài liệu FireAnt free bạn có.
+    Lấy danh sách mã & giá từ SSI iBoard (public, không token),
+    lọc < 10.000 rồi trả về list tickers (uppercase).
     """
-    log("📥 FireAnt: lấy danh sách & lọc <10k … (retry ngắn)")
-    # ví dụ endpoint: /symbols or /prices (tùy FireAnt free của bạn)
-    url = f"{FIREANT_BASE}/symbols"
-    headers = {"Authorization": f"Bearer {FIREANT_TOKEN}"} if FIREANT_TOKEN else {}
-    params = {"type": "stock"}  # tuỳ endpoint
+    log("📥 SSI: lấy danh sách & lọc <10k … (retry ngắn)")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://iboard.ssi.com.vn",
+        "Referer": "https://iboard.ssi.com.vn/"
+    }
+
+    # Một số endpoint công khai (có thể thay đổi theo thời gian):
+    # 1) Toàn thị trường
+    endpoints_all = [
+        "https://iboard.ssi.com.vn/api/market/stock?type=All",
+        "https://iboard.ssi.com.vn/api/market/stock"  # đôi khi không cần query, trả toàn bộ
+    ]
+    # 2) Chia theo sàn (fallback)
+    endpoints_by_floor = [
+        "https://iboard.ssi.com.vn/api/market/stock?floor=HOSE",
+        "https://iboard.ssi.com.vn/api/market/stock?floor=HNX",
+        "https://iboard.ssi.com.vn/api/market/stock?floor=UPCOM",
+    ]
+
+    def _parse_df(rows):
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        # tìm cột giá phù hợp
+        price_col = next((c for c in ["lastPrice","matchPrice","price","close","refPrice","r"] if c in df.columns), None)
+        if not price_col:
+            return pd.DataFrame()
+        price = pd.to_numeric(df[price_col], errors="coerce")
+        sym_col = "symbol" if "symbol" in df.columns else ("ticker" if "ticker" in df.columns else None)
+        if not sym_col:
+            return pd.DataFrame()
+        out = df.loc[(price > 0) & (price < 10000), [sym_col, price_col]].copy()
+        out.rename(columns={sym_col: "ticker", price_col: "price"}, inplace=True)
+        out["ticker"] = out["ticker"].astype(str).str.upper()
+        return out
+
     last_err = None
-    for attempt in range(1, 4):
-        try:
-            r = SESSION.get(url, headers=headers, params=params, timeout=(8, 18))
-            r.raise_for_status()
-            rows = r.json()
-            df = pd.DataFrame(rows)
-            # Chuẩn hoá: cố gắng lấy cột giá (tuỳ API: 'price', 'lastPrice', 'refPrice'…)
-            price = None
-            for col in ["price", "lastPrice", "matchPrice", "close", "refPrice"]:
-                if col in df.columns:
-                    price = pd.to_numeric(df[col], errors="coerce")
-                    break
-            if price is None:
-                raise RuntimeError("Không tìm thấy cột giá trong phản hồi FireAnt")
 
-            tickers = (
-                df.loc[(price > 0) & (price < 10000), "symbol"].dropna()
-                  .astype(str).str.upper().unique().tolist()
-                if "symbol" in df.columns
-                else df.loc[(price > 0) & (price < 10000), "ticker"].dropna()
-                     .astype(str).str.upper().unique().tolist()
-            )
-            tickers = sorted(tickers)
-            log(f"✅ FireAnt <10k: {len(tickers)} mã.")
-            cache_set("tickers_under_10k.json", {"tickers": tickers, "src": "fireant"})
-            return tickers
-        except Exception as e:
-            last_err = e
-            log(f"⚠️ FireAnt attempt {attempt}/3: {e}")
-            time.sleep(1.2)
+    # A) thử endpoint toàn thị trường
+    for attempt in range(1, 3+1):
+        for url in endpoints_all:
+            try:
+                r = requests.get(url, headers=headers, timeout=(8, 18))
+                r.raise_for_status()
+                rows = r.json()
+                df = _parse_df(rows)
+                if not df.empty:
+                    tks = sorted(df["ticker"].unique().tolist())
+                    log(f"✅ SSI(all) <10k: {len(tks)} mã.")
+                    # cache nếu bạn dùng cache_get/cache_set như cũ:
+                    cache_set("tickers_under_10k.json", {"tickers": tks, "src": "ssi"})
+                    return tks
+            except Exception as e:
+                last_err = e
+        log(f"⚠️ SSI(all) attempt {attempt}/3 lỗi: {last_err}")
+        time.sleep(1.2)
 
-    # Fallback: dùng cache cũ nếu có
+    # B) fallback: chia theo sàn
+    all_df = []
+    for attempt in range(1, 3+1):
+        all_df.clear()
+        ok_any = False
+        for url in endpoints_by_floor:
+            try:
+                r = requests.get(url, headers=headers, timeout=(8, 18))
+                r.raise_for_status()
+                rows = r.json()
+                df = _parse_df(rows)
+                if not df.empty:
+                    all_df.append(df)
+                    ok_any = True
+            except Exception as e:
+                last_err = e
+        if ok_any and all_df:
+            big = pd.concat(all_df, ignore_index=True).drop_duplicates("ticker")
+            tks = sorted(big["ticker"].unique().tolist())
+            log(f"✅ SSI(by-floor) <10k: {len(tks)} mã.")
+            cache_set("tickers_under_10k.json", {"tickers": tks, "src": "ssi"})
+            return tks
+        log(f"⚠️ SSI(by-floor) attempt {attempt}/3 lỗi: {last_err}")
+        time.sleep(1.2)
+
+    # C) dùng cache cũ nếu có
     cached = cache_get("tickers_under_10k.json", ttl_sec=24*3600)
     if cached and cached.get("tickers"):
-        log(f"🟡 FireAnt lỗi, dùng cache: {len(cached['tickers'])} mã")
+        log(f"🟡 SSI lỗi, dùng cache: {len(cached['tickers'])} mã")
         return cached["tickers"]
-    log(f"❌ FireAnt không khả dụng: {last_err}")
+
+    log(f"❌ SSI không khả dụng: {last_err}")
     return []
 
 # ============================================================
@@ -313,14 +365,14 @@ def main():
     log(f"🚀 Start BOT mode={mode}")
 
     if mode == "list":
-        tks = get_tickers_under_10k_from_fireant()
+        tks = get_tickers_under_10k_from_ssi()
         log(f"Done list: {len(tks)} mã")
         return
 
     if mode == "fa":
-        tks = get_tickers_under_10k_from_fireant()
+        tks = get_tickers_under_10k_from_ssi()
         if not tks:
-            log("⚠️ Không có tickers từ FireAnt. Dừng FA update.")
+            log("⚠️ Không có tickers từ ssi. Dừng FA update.")
             return
         _ = run_fa_update(tks)
         log("FA update DONE.")
@@ -328,15 +380,39 @@ def main():
 
     # mode == scan (default): dùng FA cache + TA realtime
     df_fa_cache = load_fa_cache()
-    if df_fa_cache.empty:
-        log("🟡 FA cache trống → thử cập nhật nhanh")
-        tks = get_tickers_under_10k_from_fireant()
-        df_fa_cache = run_fa_update(tks) if tks else pd.DataFrame()
-
-    fa_list = analyze_fa(df_fa_cache)
+    fa_list = analyze_fa(df_fa_cache) if not df_fa_cache.empty else []
+    
     if not fa_list:
-        send_telegram("⚠️ BOT: Không có mã nào qua FA (cache rỗng hoặc dữ liệu thiếu).")
+        # 👉 TA-only: khi FA rỗng hoặc không pass
+        log("🟠 Không dùng được FA → chuyển sang TA-only.")
+        tks = get_tickers_under_10k_from_ssi()
+        if not tks:
+            send_telegram("⚠️ BOT: ssi/VNDirect đều không khả dụng, tạm dừng.")
+            return
+        # chạy TA cho danh sách <10k, bỏ bước FA
+        final = []
+        for i, tk in enumerate(tks, 1):
+            log(f"[TA-only] {i}/{len(tks)} — {tk}")
+            df = get_ohlc_days_vnd(tk, days=180)
+            conds, score = technical_signals(df)
+            if conds.get("enough_data") and score >= 3:
+                final.append({"ticker": tk, "price": float(df['close'].iloc[-1]), "eps": 0, "roe": 0, "pe": 0, "ta_score": score})
+        send_telegram(format_msg(final))
+        log(f"ALL DONE (TA-only). Final={len(final)}")
         return
+    
+    # … nếu FA có dữ liệu thì chạy flow cũ (FA -> TA)
+    final = []
+    for i, it in enumerate(fa_list, 1):
+        tk = it["ticker"]
+        log(f"[TA] {i}/{len(fa_list)} — {tk}")
+        df = get_ohlc_days_vnd(tk, days=180)
+        conds, score = technical_signals(df)
+        if conds.get("enough_data") and score >= 3:
+            final.append({**it, "ta_score": score})
+    
+    send_telegram(format_msg(final))
+    log(f"ALL DONE. Final={len(final)}")
 
     final = []
     for i, it in enumerate(fa_list, 1):
