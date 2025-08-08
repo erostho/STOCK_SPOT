@@ -9,7 +9,7 @@ import numpy as np
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from time import sleep
-
+import time
 
 load_dotenv()
 
@@ -53,22 +53,35 @@ def _tickers_from_market(market: str) -> list:
     price = pd.to_numeric(df.get("adClose", df.get("close")), errors="coerce")
     return df.loc[(price > 0) & (price < 10000), "ticker"].dropna().unique().tolist()
 
-def get_tickers_under_10k() -> list:
-    log("📥 Lấy danh sách mã <10k (chia theo sàn)…")
-    tickers = []
-    markets = ["HOSE", "HNX", "UPCOM"]
-    for m in markets:
-        try:
-            tks = _tickers_from_market(m)
-            log(f"  ✅ {m}: {len(tks)} mã")
-            tickers.extend(tks)
-            sleep(0.4)  # nhỏ thôi để server đỡ nghẽn
-        except Exception as e:
-            log(f"  ⚠️ {m}: lỗi stock_prices – {e}")
-    tickers = sorted(set(tickers))
-    if tickers:
-        log(f"✅ Tổng cộng {len(tickers)} mã <10k.")
-        return tickers
+def _one_page(market: str, page: int, size: int = 300):
+    params = {"q": f"market:{market}", "page": page, "size": size, "sort": "ticker"}
+    r = SESSION.get(PRICE_URL, params=params, timeout=(40, 60))
+    r.raise_for_status()
+    return pd.DataFrame(r.json().get("data", []))
+
+def get_tickers_under_10k():
+    log("📥 Lấy danh sách mã <10k (paginate theo sàn + page)…")
+    all_rows = []
+    for m in ["HOSE", "HNX", "UPCOM"]:
+        for page in range(1, 8):            # tối đa ~ 7 * 300 = 2100/market
+            try:
+                dfp = _one_page(m, page, 300)
+                if dfp.empty:
+                    break
+                all_rows.append(dfp)
+                log(f"  ✅ {m} page {page}: {len(dfp)} rows")
+                time.sleep(0.3)
+            except Exception as e:
+                log(f"  ⚠️ {m} page {page}: {e}")
+                break
+    if not all_rows:
+        log("🟡 Không lấy được qua stock_prices, bỏ lọc <10k ở bước này (fallback FA).")
+        return []
+    df = pd.concat(all_rows, ignore_index=True)
+    price = pd.to_numeric(df.get("adClose", df.get("close")), errors="coerce")
+    tks = df.loc[(price > 0) & (price < 10000), "ticker"].dropna().unique().tolist()
+    log(f"✅ Tổng {len(tks)} mã <10k.")
+    return sorted(tks)
 
     # -------- FALLBACK: lấy từ financial_reports latest (nhẹ hơn) --------
     log("🟡 Fallback: lấy mã <10k từ financial_reports ~isLatest:true …")
