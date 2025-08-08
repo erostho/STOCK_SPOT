@@ -6,6 +6,8 @@ import ta
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import numpy as np
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 load_dotenv()
 
@@ -23,22 +25,36 @@ def log(msg):
     print(f"[{now}] {msg}")
 
 # ====== 1. Lấy BCTC 4 quý ======
-def get_fundamentals_latest_quarters(size=4000):
-    log("📥 Lấy BCTC từ VNDIRECT...")
+# session dùng chung có retry
+def make_session():
+    s = requests.Session()
+    retries = Retry(
+        total=5, backoff_factor=0.8,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"]
+    )
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    s.mount("http://", HTTPAdapter(max_retries=retries))
+    return s
+
+SESSION = make_session()
+
+def get_fundamentals_latest_quarters(size=1500):
+    log("📥 Lấy BCTC từ VNDIRECT (có retry/backoff)...")
     params = {
         "q": "reportType:QUARTER",
-        "size": size,
+        "size": size,                 # nhỏ hơn để tránh time-out
         "sort": "ticker,-yearQuarter"
     }
     try:
-        res = requests.get(FR_URL, params=params, timeout=25)
+        res = SESSION.get(FR_URL, params=params, timeout=40)
         res.raise_for_status()
         data = res.json().get("data", [])
         df = pd.DataFrame(data)
         log(f"✅ Lấy {len(df)} dòng BCTC")
         return df
     except Exception as e:
-        log(f"❌ Lỗi lấy BCTC: {e}")
+        log(f"❌ Lỗi lấy BCTC (đã retry): {e}")
         return pd.DataFrame()
 
 # ====== 2. Phân tích FA nâng cao ======
