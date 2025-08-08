@@ -120,99 +120,45 @@ def get_tickers_under_10k_from_vnd_prices():
     log(f"📊 VNDIRECT paginate xong: {len(tks)} mã <10k.")
     return tks
     
-def get_tickers_under_10k_from_ssi():
+import requests
+
+def get_tickers_under_10k_from_pinetree():
     """
-    Lấy danh sách mã & giá từ SSI iBoard (public, không token),
-    lọc < 10.000 rồi trả về list tickers (uppercase).
+    Lấy danh sách mã cổ phiếu có giá < 10,000 VNĐ từ bảng giá Pinetree
+    Trả về list mã CP dạng ['AAA', 'BBB', ...]
     """
-    log("📥 SSI: lấy danh sách & lọc <10k … (retry ngắn)")
+    url = "https://price-api.pinetree.com.vn/api/StockBoard/Market?marketType=ALL"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Origin": "https://iboard.ssi.com.vn",
-        "Referer": "https://iboard.ssi.com.vn/"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115 Safari/537.36"
     }
 
-    # Một số endpoint công khai (có thể thay đổi theo thời gian):
-    # 1) Toàn thị trường
-    endpoints_all = [
-        "https://iboard.ssi.com.vn/api/market/stock?type=All",
-        "https://iboard.ssi.com.vn/api/market/stock"  # đôi khi không cần query, trả toàn bộ
-    ]
-    # 2) Chia theo sàn (fallback)
-    endpoints_by_floor = [
-        "https://iboard.ssi.com.vn/api/market/stock?floor=HOSE",
-        "https://iboard.ssi.com.vn/api/market/stock?floor=HNX",
-        "https://iboard.ssi.com.vn/api/market/stock?floor=UPCOM",
-    ]
+    try:
+        res = requests.get(url, headers=headers, timeout=(8, 18))
+        res.raise_for_status()
+        data = res.json()
 
-    def _parse_df(rows):
-        if not rows:
-            return pd.DataFrame()
-        df = pd.DataFrame(rows)
-        # tìm cột giá phù hợp
-        price_col = next((c for c in ["lastPrice","matchPrice","price","close","refPrice","r"] if c in df.columns), None)
-        if not price_col:
-            return pd.DataFrame()
-        price = pd.to_numeric(df[price_col], errors="coerce")
-        sym_col = "symbol" if "symbol" in df.columns else ("ticker" if "ticker" in df.columns else None)
-        if not sym_col:
-            return pd.DataFrame()
-        out = df.loc[(price > 0) & (price < 10000), [sym_col, price_col]].copy()
-        out.rename(columns={sym_col: "ticker", price_col: "price"}, inplace=True)
-        out["ticker"] = out["ticker"].astype(str).str.upper()
-        return out
-
-    last_err = None
-
-    # A) thử endpoint toàn thị trường
-    for attempt in range(1, 3+1):
-        for url in endpoints_all:
+        tickers = []
+        for item in data.get("data", []):
             try:
-                r = requests.get(url, headers=headers, timeout=(8, 18))
-                r.raise_for_status()
-                rows = r.json()
-                df = _parse_df(rows)
-                if not df.empty:
-                    tks = sorted(df["ticker"].unique().tolist())
-                    log(f"✅ SSI(all) <10k: {len(tks)} mã.")
-                    # cache nếu bạn dùng cache_get/cache_set như cũ:
-                    cache_set("tickers_under_10k.json", {"tickers": tks, "src": "ssi"})
-                    return tks
+                price = item.get("lastPrice")
+                if price is not None and price < 10000:
+                    symbol = item.get("symbol")
+                    if symbol:
+                        tickers.append(symbol)
             except Exception as e:
-                last_err = e
-        log(f"⚠️ SSI(all) attempt {attempt}/3 lỗi: {last_err}")
-        time.sleep(1.2)
+                print(f"⚠️ Lỗi đọc dữ liệu 1 mã: {e}")
 
-    # B) fallback: chia theo sàn
-    all_df = []
-    for attempt in range(1, 3+1):
-        all_df.clear()
-        ok_any = False
-        for url in endpoints_by_floor:
-            try:
-                r = requests.get(url, headers=headers, timeout=(8, 18))
-                r.raise_for_status()
-                rows = r.json()
-                df = _parse_df(rows)
-                if not df.empty:
-                    all_df.append(df)
-                    ok_any = True
-            except Exception as e:
-                last_err = e
-        if ok_any and all_df:
-            big = pd.concat(all_df, ignore_index=True).drop_duplicates("ticker")
-            tks = sorted(big["ticker"].unique().tolist())
-            log(f"✅ SSI(by-floor) <10k: {len(tks)} mã.")
-            cache_set("tickers_under_10k.json", {"tickers": tks, "src": "ssi"})
-            return tks
-        log(f"⚠️ SSI(by-floor) attempt {attempt}/3 lỗi: {last_err}")
-        time.sleep(1.2)
+        print(f"✅ Lấy từ Pinetree được {len(tickers)} mã < 10k")
+        return tickers
 
-    # C) dùng cache nếu có
+    except Exception as e:
+        print(f"❌ Lỗi khi lấy dữ liệu từ Pinetree: {e}")
+        return []
+
+    # dùng cache nếu có
     cached = cache_get("tickers_under_10k.json", ttl_sec=24*3600)
     if cached and cached.get("tickers"):
-        log(f"🟡 SSI lỗi, dùng cache: {len(cached['tickers'])} mã")
+        log(f"🟡 pinetree lỗi, dùng cache: {len(cached['tickers'])} mã")
         return cached["tickers"]
     
     # 👉 NEW: Fallback sang VNDIRECT phân trang nhỏ (không nặng)
@@ -223,7 +169,7 @@ def get_tickers_under_10k_from_ssi():
         cache_set("tickers_under_10k.json", {"tickers": tks_vnd, "src": "vnd_price"})
         return tks_vnd
     
-    log(f"❌ SSI không khả dụng: {last_err}")
+    log(f"❌ pinetree không khả dụng: {last_err}")
     return []
 
 # ============================================================
@@ -416,12 +362,12 @@ def main():
     log(f"🚀 Start BOT mode={mode}")
 
     if mode == "list":
-        tks = get_tickers_under_10k_from_ssi()
+        tks = get_tickers_under_10k_from_pinetree()
         log(f"Done list: {len(tks)} mã")
         return
 
     if mode == "fa":
-        tks = get_tickers_under_10k_from_ssi()
+        tks = get_tickers_under_10k_from_pinetree()
         if not tks:
             log("⚠️ Không có tickers từ ssi. Dừng FA update.")
             return
@@ -436,7 +382,7 @@ def main():
     if not fa_list:
         # 👉 TA-only: khi FA rỗng hoặc không pass
         log("🟠 Không dùng được FA → chuyển sang TA-only.")
-        tks = get_tickers_under_10k_from_ssi()
+        tks = get_tickers_under_10k_from_pinetree()
         if not tks:
             send_telegram("⚠️ BOT: ssi/VNDirect đều không khả dụng, tạm dừng.")
             return
