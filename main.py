@@ -107,7 +107,7 @@ def get_tickers_under_10k():
 def get_fr_one_ticker(tk: str):
     try:
         params = {"q": f"ticker:{tk}~reportType:QUARTER", "size": 8, "sort": "-yearQuarter"}
-        r = SESSION.get(FR_URL, params=params, timeout=(40, 80))
+        r = SESSION.get(FR_URL, params=params, timeout=(8, 18))
         r.raise_for_status()
         return r.json().get("data", [])
     except Exception as e:
@@ -206,7 +206,7 @@ def get_ohlc_days(ticker: str, days: int = 120) -> pd.DataFrame:
     start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
     params = {"q": f"ticker:{ticker}~date:gte:{start}", "sort": "date", "size": 1000}
     try:
-        r = SESSION.get(PRICE_URL, params=params, timeout=(40, 80))
+        r = SESSION.get(PRICE_URL, params=params, timeout=(8, 18))
         r.raise_for_status()
         data = r.json().get("data", [])
         if not data:
