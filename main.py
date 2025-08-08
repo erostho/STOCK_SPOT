@@ -283,6 +283,59 @@ def analyze_fa(df_quarter: pd.DataFrame):
 # ============================================================
 # B3) TA TỪ VNDIRECT (REALTIME MỖI LẦN CHẠY)
 # ============================================================
+import time
+from datetime import datetime, timedelta
+
+def get_ohlc_days_tcbs(ticker: str, days: int = 180):
+    """
+    Lấy OHLC daily từ TCBS (public, no token) cho TA EOD.
+    Trả về DataFrame có cột: date, open, high, low, close, volume
+    """
+    tk = str(ticker).upper().strip()
+    # khoảng thời gian (buffer lớn hơn 20% để chắc chắn đủ phiên)
+    to_dt   = datetime.utcnow()
+    from_dt = to_dt - timedelta(days=int(days * 1.3))
+    to_s, from_s = int(to_dt.timestamp()), int(from_dt.timestamp())
+
+    url = ("https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/"
+           f"bars-long-term?symbol={tk}&type=stock&resolution=D&from={from_s}&to={to_s}")
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+    last_err = None
+    for attempt in range(1, 3+1):
+        try:
+            r = requests.get(url, headers=headers, timeout=(6, 12))
+            r.raise_for_status()
+            js = r.json() or {}
+            rows = js.get("data", js)  # TCBS trả {"data":[...]} hoặc list
+            df = pd.DataFrame(rows)
+            if df.empty:
+                raise RuntimeError("TCBS trả rỗng")
+
+            # Chuẩn hoá cột, TCBS thường dùng keys: o,h,l,c,v,t (t = epoch seconds)
+            rename_map = {}
+            for a, b in [("o","open"),("h","high"),("l","low"),("c","close"),("v","volume")]:
+                if a in df.columns: rename_map[a] = b
+            if "t" in df.columns:
+                df["date"] = pd.to_datetime(df["t"], unit="s").dt.date
+            elif "time" in df.columns:
+                df["date"] = pd.to_datetime(df["time"]).dt.date
+            df = df.rename(columns=rename_map)
+            cols = ["date","open","high","low","close","volume"]
+            df = df[[c for c in cols if c in df.columns]].dropna().sort_values("date").reset_index(drop=True)
+
+            # Giữ lại đúng số ngày yêu cầu (nếu cần)
+            if len(df) > days:
+                df = df.iloc[-days:].reset_index(drop=True)
+
+            return df
+        except Exception as e:
+            last_err = e
+            log(f"⚠️ OHLC {tk} TCBS attempt {attempt}/3 lỗi: {e}")
+            time.sleep(0.6)
+    log(f"❌ TCBS không khả dụng cho {tk}: {last_err}")
+    return pd.DataFrame()
+
 def get_ohlc_days_vnd(ticker, days=120):
     start = (datetime.now() - timedelta(days=days*2)).strftime("%Y-%m-%d")
     params = {"q": f"ticker:{ticker}~date:gte:{start}", "sort": "date", "size": 1000}
@@ -403,7 +456,7 @@ def main():
         final = []
         for i, tk in enumerate(tks, 1):
             log(f"[TA-only] {i}/{len(tks)} — {tk}")
-            df = get_ohlc_days_vnd(tk, days=180)
+            df = get_ohlc_days_tcbs(tk, days=180)
             conds, score = technical_signals(df)
             if conds.get("enough_data") and score >= 3:
                 final.append({"ticker": tk, "price": float(df['close'].iloc[-1]), "eps": 0, "roe": 0, "pe": 0, "ta_score": score})
