@@ -52,50 +52,32 @@ def _tickers_from_market(market: str) -> list:
     df = pd.DataFrame(r.json().get("data", []))
     price = pd.to_numeric(df.get("adClose", df.get("close")), errors="coerce")
     return df.loc[(price > 0) & (price < 10000), "ticker"].dropna().unique().tolist()
-
-def _one_page(market: str, page: int, size: int = 300):
-    params = {"q": f"market:{market}", "page": page, "size": size, "sort": "ticker"}
-    r = SESSION.get(PRICE_URL, params=params, timeout=(40, 60))
-    r.raise_for_status()
-    return pd.DataFrame(r.json().get("data", []))
-
+    
+# Lọc ứng viên <10k bằng bản BCTC mới nhất (nhẹ, 1 request)
 def get_tickers_under_10k():
-    log("📥 Lấy danh sách mã <10k (paginate theo sàn + page)…")
-    all_rows = []
-    for m in ["HOSE", "HNX", "UPCOM"]:
-        for page in range(1, 8):            # tối đa ~ 7 * 300 = 2100/market
-            try:
-                dfp = _one_page(m, page, 300)
-                if dfp.empty:
-                    break
-                all_rows.append(dfp)
-                log(f"  ✅ {m} page {page}: {len(dfp)} rows")
-                time.sleep(0.3)
-            except Exception as e:
-                log(f"  ⚠️ {m} page {page}: {e}")
-                break
-    if not all_rows:
-        log("🟡 Không lấy được qua stock_prices, bỏ lọc <10k ở bước này (fallback FA).")
-        return []
-    df = pd.concat(all_rows, ignore_index=True)
-    price = pd.to_numeric(df.get("adClose", df.get("close")), errors="coerce")
-    tks = df.loc[(price > 0) & (price < 10000), "ticker"].dropna().unique().tolist()
-    log(f"✅ Tổng {len(tks)} mã <10k.")
-    return sorted(tks)
-
-    # -------- FALLBACK: lấy từ financial_reports latest (nhẹ hơn) --------
-    log("🟡 Fallback: lấy mã <10k từ financial_reports ~isLatest:true …")
+    log("📥 Lọc mã <10k từ financial_reports (~isLatest:true)…")
     try:
-        params = {"q": "reportType:QUARTER~isLatest:true", "size": 1500, "sort": "ticker"}
-        r = SESSION.get(FR_URL, params=params, timeout=(20, 40))
+        params = {
+            "q": "reportType:QUARTER~isLatest:true",
+            "size": 1500,           # đủ cover 3 sàn
+            "sort": "ticker"
+        }
+        r = SESSION.get(FR_URL, params=params, timeout=(30, 60))
         r.raise_for_status()
         df = pd.DataFrame(r.json().get("data", []))
-        price = pd.to_numeric(df.get("price"), errors="coerce")  # trường price thường có trong latest
-        tks_fb = df.loc[(price > 0) & (price < 10000), "ticker"].dropna().unique().tolist()
-        log(f"  ✅ Fallback lấy được {len(tks_fb)} mã.")
-        return tks_fb
+        if df.empty:
+            log("⚠️ Không nhận được dữ liệu latest FA.")
+            return []
+
+        price = pd.to_numeric(df.get("price"), errors="coerce")
+        tickers = (
+            df.loc[(price > 0) & (price < 10000), "ticker"]
+              .dropna().unique().tolist()
+        )
+        log(f"✅ Ứng viên <10k: {len(tickers)} mã.")
+        return sorted(tickers)
     except Exception as e:
-        log(f"  ❌ Fallback cũng lỗi: {e}")
+        log(f"❌ Lỗi lọc <10k từ latest FA: {e}")
         return []
         
 # 2) Lấy BCTC cho từng mã (nhỏ, nhanh) và build list FA
