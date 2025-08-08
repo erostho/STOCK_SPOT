@@ -283,85 +283,50 @@ def analyze_fa(df_quarter: pd.DataFrame):
 # ============================================================
 # B3) TA TỪ VNDIRECT (REALTIME MỖI LẦN CHẠY)
 # ============================================================
-import time
-from datetime import datetime, timedelta
-def get_ohlc_days_tcbs(ticker: str, days: int = 180):
+
+def get_ohlc_days_vnd_per_ticker(ticker: str, days: int = 180):
     """
-    OHLC daily từ TCBS (public, no token) cho TA EOD.
-    Trả DataFrame: date, open, high, low, close, volume
+    Lấy nến ngày (OHLC) từ VNDIRECT cho 1 mã.
+    Ổn định hơn gọi bulk; có retry + timeout dài.
     """
-    import time
     tk = str(ticker).upper().strip()
-
-    # ----- tính mốc thời gian chuẩn, đảm bảo from < to -----
-    to_ts = int(time.time())                             # epoch giây hiện tại
-    from_ts = to_ts - int(days * 86400 * 1.4)           # buffer 40%
-    if from_ts >= to_ts:
-        from_ts, to_ts = to_ts - int(days * 86400 * 2), to_ts  # safety
-
-    base = "https://apipubaws.tcbs.com.vn/stock-insight/v1/stock"
-    urls = [
-        f"{base}/bars-long-term?symbol={tk}&type=stock&resolution=D&from={from_ts}&to={to_ts}",
-        f"{base}/bars?symbol={tk}&type=stock&resolution=D&from={from_ts}&to={to_ts}",  # fallback
-    ]
-    H = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    end = datetime.utcnow().date()
+    start = end - timedelta(days=int(days * 2))  # buffer rộng
+    q = f"ticker:{tk}~date:gte:{start.isoformat()}~date:lte:{end.isoformat()}"
 
     last_err = None
-    for url in urls:
-        for attempt in range(1, 3 + 1):
-            try:
-                r = requests.get(url, headers=H, timeout=(6, 12))
-                r.raise_for_status()
-                js = r.json() or {}
-                rows = js.get("data", js)
-                df = pd.DataFrame(rows)
-                if df.empty:
-                    raise RuntimeError("TCBS trả rỗng")
+    for attempt in range(1, 3+1):
+        try:
+            params = {"q": q, "sort": "date", "order": "asc", "size": 1000}
+            r = SESSION.get(PRICE_URL, params=params, timeout=(10, 24))
+            r.raise_for_status()
+            rows = r.json().get("data", [])
+            if not rows:
+                raise RuntimeError("VNDIRECT trả rỗng")
 
-                # chuẩn hoá key: o,h,l,c,v,t
-                rename_map = {}
-                for a, b in [("o","open"),("h","high"),("l","low"),("c","close"),("v","volume")]:
-                    if a in df.columns: rename_map[a] = b
-                if "t" in df.columns:
-                    df["date"] = pd.to_datetime(df["t"], unit="s").dt.date
-                elif "time" in df.columns:
-                    df["date"] = pd.to_datetime(df["time"]).dt.date
-
-                df = df.rename(columns=rename_map)
-                keep = [c for c in ["date","open","high","low","close","volume"] if c in df.columns]
-                df = df[keep].dropna().sort_values("date").reset_index(drop=True)
-
-                # cắt đúng số ngày yêu cầu
-                if len(df) > days:
-                    df = df.iloc[-days:].reset_index(drop=True)
-
-                return df
-
-            except Exception as e:
-                last_err = e
-                log(f"⚠️ OHLC {tk} TCBS attempt {attempt}/3 ({'long' if 'long-term' in url else 'short'}): {e}")
-                time.sleep(0.5)
-        # thử endpoint kế tiếp nếu endpoint này không ổn
-    log(f"❌ TCBS không khả dụng cho {tk}: {last_err}")
+            df = pd.DataFrame(rows)
+            # Chuẩn hoá cột
+            # VNDIRECT thường có: open, high, low, close, average, nmVolume, nmValue, date
+            need = ["date","open","high","low","close","nmVolume"]
+            for c in need:
+                if c not in df.columns and c != "nmVolume":
+                    raise RuntimeError(f"Thiếu cột {c}")
+            df["date"] = pd.to_datetime(df["date"]).dt.date
+            if "nmVolume" in df.columns:
+                df = df.rename(columns={"nmVolume": "volume"})
+            if "volume" not in df.columns:
+                df["volume"] = pd.NA
+            df = df[["date","open","high","low","close","volume"]].dropna(subset=["close"])
+            # cắt đúng số ngày
+            if len(df) > days:
+                df = df.iloc[-days:].reset_index(drop=True)
+            return df
+        except Exception as e:
+            last_err = e
+            log(f"⚠️ OHLC {tk} VND attempt {attempt}/3: {e}")
+            time.sleep(0.6)
+    log(f"❌ VNDIRECT không khả dụng cho {tk}: {last_err}")
     return pd.DataFrame()
-
-def get_ohlc_days_vnd(ticker, days=120):
-    start = (datetime.now() - timedelta(days=days*2)).strftime("%Y-%m-%d")
-    params = {"q": f"ticker:{ticker}~date:gte:{start}", "sort": "date", "size": 1000}
-    try:
-        r = SESSION.get(PRICE_URL, params=params, timeout=(8, 18))
-        r.raise_for_status()
-        data = r.json().get("data", [])
-        if not data: return pd.DataFrame()
-        df = pd.DataFrame(data)
-        for c,n in [("adOpen","open"),("adHigh","high"),("adLow","low"),("adClose","close"),("adVolume","volume")]:
-            if c in df.columns:
-                df[n] = pd.to_numeric(df[c], errors="coerce")
-        df = df[["date","open","high","low","close","volume"]].dropna().sort_values("date")
-        return df.tail(150)
-    except Exception as e:
-        log(f"⚠️ OHLC {ticker} lỗi: {e}")
-        return pd.DataFrame()
 
 def technical_signals(df: pd.DataFrame):
     """
@@ -481,7 +446,7 @@ def main():
     for i, it in enumerate(fa_list, 1):
         tk = it["ticker"]
         log(f"[TA] {i}/{len(fa_list)} — {tk}")
-        df = get_ohlc_days_vnd(tk, days=180)
+        df = get_ohlc_days_vnd_per_ticket(tk, days=180)
         conds, score = technical_signals(df)
         if conds.get("enough_data") and score >= 3:
             final.append({**it, "ta_score": score})
