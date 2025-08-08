@@ -119,89 +119,113 @@ def get_tickers_under_10k_from_vnd_prices():
     tks = sorted(all_tickers)
     log(f"📊 VNDIRECT paginate xong: {len(tks)} mã <10k.")
     return tks
-    
-import requests
-def get_tickers_under_10k_from_cafef():
+def get_tickers_under_10k_from_vietstock():
     """
-    Lấy list mã <10k từ CafeF bằng pandas.read_html (public, không token).
-    Nếu CafeF lỗi/đổi cấu trúc -> dùng cache 24h -> fallback sang VNDirect paginate nhỏ.
+    Lấy list mã <10k từ Vietstock.
+    - Nếu có env VIETSTOCK_JSON_URL: dùng JSON (ổn định, nhanh)
+    - Nếu không: parse HTML bằng pandas.read_html (dễ bảo trì)
+    - Có retry + cache 24h + fallback sang VNDirect paginate
     """
-    log("📥 CafeF: lấy danh sách & lọc <10k … (retry ngắn)")
-    import pandas as pd, numpy as np
-
-    urls = [
-        # Trang "Bảng giá" / "Thị trường" của CafeF (có table)
-        "https://cafef.vn/thi-truong-chung-khoan.chn",
-        "https://cafef.vn/du-lieu.chn",
-    ]
+    import pandas as pd
+    VS_JSON_URL = os.getenv("VIETSTOCK_JSON_URL", "").strip()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml",
-        "Referer": "https://cafef.vn/"
+        "Accept": "application/json, text/plain, */*"
     }
 
-    def _try_one(url):
-        # tải HTML rồi dùng read_html để bắt mọi table có thể có
-        r = requests.get(url, headers=headers, timeout=(8, 18))
-        r.raise_for_status()
-        # đọc tất cả bảng; chọn bảng nào có cột "Mã" và một cột giá
-        tables = pd.read_html(r.text, flavor="bs4", thousands='.', decimal=',', displayed_only=False)
-        for df in tables:
-            cols = [str(c).strip().lower() for c in df.columns]
-            # các tên cột phổ biến
-            sym_candidates = ["mã", "mã ck", "symbol", "ticker"]
-            price_candidates = ["giá", "giá khớp", "khớp lệnh", "close", "giá close", "price"]
+    def _parse_generic(rows, symbol_cols=("symbol","ticker","ma","mã","MaCK","Ma"), price_cols=("lastPrice","price","close","Gia","Giá","GiaKL","Giá khớp")):
+        if not rows: return []
+        df = pd.DataFrame(rows)
+        sym = next((c for c in symbol_cols if c in df.columns), None)
+        pcol = next((c for c in price_cols if c in df.columns), None)
+        if not sym or not pcol: return []
+        # chuẩn hoá giá (có thể dùng dấu . ngăn nghìn, , thập phân)
+        price = pd.to_numeric(
+            df[pcol].astype(str)
+                    .str.replace(r"[^\d,\.]", "", regex=True)
+                    .str.replace(".", "", regex=False)
+                    .str.replace(",", ".", regex=False),
+            errors="coerce"
+        )
+        tks = (df.loc[(price > 0) & (price < 10000), sym]
+                 .astype(str).str.upper().str.strip()
+                 .dropna().unique().tolist())
+        return sorted(tks)
 
-            # tìm cột mã
-            sym_idx = next((i for i,c in enumerate(cols) if c in sym_candidates), None)
-            if sym_idx is None:
-                continue
-            # tìm cột giá
-            pr_idx = next((i for i,c in enumerate(cols) if c in price_candidates), None)
-            if pr_idx is None:
-                continue
-
-            sym_col = df.columns[sym_idx]
-            pr_col  = df.columns[pr_idx]
-
-            # chuẩn hoá
-            df[sym_col] = df[sym_col].astype(str).str.upper().str.strip()
-            # ép giá số (bảng VN hay dùng dấu . ngăn nghìn, , thập phân)
-            df[pr_col] = (
-                df[pr_col].astype(str)
-                         .str.replace(r"[^\d,\.]", "", regex=True)
-                         .str.replace(".", "", regex=False)
-                         .str.replace(",", ".", regex=False)
-            )
-            price = pd.to_numeric(df[pr_col], errors="coerce")
-            tks = (df.loc[(price > 0) & (price < 10000), sym_col]
-                     .dropna().unique().tolist())
-            tks = sorted(set(tks))
-            if tks:
-                return tks
-        return []
-
+    # 1) Thử JSON nếu có (bạn lấy từ Network tab và set env VIETSTOCK_JSON_URL)
     last_err = None
-    for attempt in range(1, 3+1):
-        for url in urls:
+    if VS_JSON_URL:
+        for attempt in range(1, 3+1):
             try:
-                tks = _try_one(url)
+                r = requests.get(VS_JSON_URL, headers=headers, timeout=(8,18))
+                r.raise_for_status()
+                js = r.json()
+                # một số endpoint trả {"data":[...]} hoặc list trực tiếp
+                rows = js.get("data", js) if isinstance(js, dict) else js
+                tks = _parse_generic(rows)
                 if tks:
-                    log(f"✅ CafeF <10k: {len(tks)} mã.")
-                    cache_set("tickers_under_10k.json", {"tickers": tks, "src": "cafef"})
+                    log(f"✅ Vietstock(JSON) <10k: {len(tks)} mã.")
+                    cache_set("tickers_under_10k.json", {"tickers": tks, "src": "vietstock-json"})
                     return tks
             except Exception as e:
                 last_err = e
-        log(f"⚠️ CafeF attempt {attempt}/3 lỗi: {last_err}")
+                log(f"⚠️ Vietstock JSON attempt {attempt}/3: {e}")
+                time.sleep(0.8)
+
+    # 2) Không có JSON → parse HTML 1–2 trang có bảng
+    html_urls = [
+        "https://vietstock.vn/doanh-nghiep-a-z.htm",        # danh sách DN (thường có bảng mã)
+        "https://vietstock.vn/doanh-nghiep.htm"             # trang dữ liệu khác có table
+    ]
+    headers_html = {
+        "User-Agent": headers["User-Agent"],
+        "Accept": "text/html,application/xhtml+xml",
+        "Referer": "https://vietstock.vn/"
+    }
+
+    for attempt in range(1, 3+1):
+        for url in html_urls:
+            try:
+                r = requests.get(url, headers=headers_html, timeout=(8,18))
+                r.raise_for_status()
+                tables = pd.read_html(r.text, flavor="bs4", thousands='.', decimal=',', displayed_only=False)
+                for df in tables:
+                    # phỏng đoán cột tên mã/giá bằng nhiều alias
+                    cols = [str(c).strip().lower() for c in df.columns]
+                    sym_alias = ["mã", "mã ck", "mã cổ phiếu", "symbol", "ticker"]
+                    price_alias = ["giá", "giá khớp", "khớp lệnh", "close", "giá close", "price"]
+                    sym_idx = next((i for i,c in enumerate(cols) if c in sym_alias), None)
+                    pr_idx  = next((i for i,c in enumerate(cols) if c in price_alias), None)
+                    if sym_idx is None or pr_idx is None:
+                        continue
+                    sym_col = df.columns[sym_idx]
+                    pr_col  = df.columns[pr_idx]
+                    # chuẩn hoá
+                    df[sym_col] = df[sym_col].astype(str).str.upper().str.strip()
+                    df[pr_col] = (df[pr_col].astype(str)
+                                              .str.replace(r"[^\d,\.]", "", regex=True)
+                                              .str.replace(".", "", regex=False)
+                                              .str.replace(",", ".", regex=False))
+                    price = pd.to_numeric(df[pr_col], errors="coerce")
+                    tks = (df.loc[(price>0)&(price<10000), sym_col]
+                             .dropna().unique().tolist())
+                    if tks:
+                        tks = sorted(set(tks))
+                        log(f"✅ Vietstock(HTML) <10k: {len(tks)} mã.")
+                        cache_set("tickers_under_10k.json", {"tickers": tks, "src": "vietstock-html"})
+                        return tks
+            except Exception as e:
+                last_err = e
+        log(f"⚠️ Vietstock HTML attempt {attempt}/3 lỗi: {last_err}")
         time.sleep(1.0)
 
-    # dùng cache nếu có
+    # 3) Cache 24h
     cached = cache_get("tickers_under_10k.json", ttl_sec=24*3600)
     if cached and cached.get("tickers"):
-        log(f"🟡 CafeF lỗi, dùng cache: {len(cached['tickers'])} mã")
+        log(f"🟡 Vietstock lỗi, dùng cache: {len(cached['tickers'])} mã")
         return cached["tickers"]
 
-    # 👉 fallback sang VNDirect paginate nhỏ (đã có sẵn trong file của bạn)
+    # 4) Fallback sang VNDirect paginate (hàm bạn đã có)
     if 'get_tickers_under_10k_from_vnd_prices' in globals():
         log("🔁 Fallback: dùng VNDirect stock_prices (paginate nhỏ)…")
         tks_vnd = get_tickers_under_10k_from_vnd_prices()
@@ -210,7 +234,7 @@ def get_tickers_under_10k_from_cafef():
             cache_set("tickers_under_10k.json", {"tickers": tks_vnd, "src": "vnd_price"})
             return tks_vnd
 
-    log(f"❌ CafeF không khả dụng: {last_err}")
+    log(f"❌ Vietstock không khả dụng: {last_err}")
     return []
 
 # ============================================================
@@ -403,14 +427,14 @@ def main():
     log(f"🚀 Start BOT mode={mode}")
 
     if mode == "list":
-        tks = get_tickers_under_10k_from_cafef()
+        tks = get_tickers_under_10k_from_vietstock()
         log(f"Done list: {len(tks)} mã")
         return
 
     if mode == "fa":
-        tks = get_tickers_under_10k_from_cafef()
+        tks = get_tickers_under_10k_from_vietstock()
         if not tks:
-            log("⚠️ Không có tickers từ ssi. Dừng FA update.")
+            log("⚠️ Không có tickers từ vietstock. Dừng FA update.")
             return
         _ = run_fa_update(tks)
         log("FA update DONE.")
@@ -423,9 +447,9 @@ def main():
     if not fa_list:
         # 👉 TA-only: khi FA rỗng hoặc không pass
         log("🟠 Không dùng được FA → chuyển sang TA-only.")
-        tks = get_tickers_under_10k_from_cafef()
+        tks = get_tickers_under_10k_from_vietstock()
         if not tks:
-            send_telegram("⚠️ BOT: ssi/VNDirect đều không khả dụng, tạm dừng.")
+            send_telegram("⚠️ BOT: vietstock/VNDirect đều không khả dụng, tạm dừng.")
             return
         # chạy TA cho danh sách <10k, bỏ bước FA
         final = []
