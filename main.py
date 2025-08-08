@@ -12,7 +12,7 @@ import ta
 from datetime import datetime, timedelta
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-
+import time
 # ---------- ENV ----------
 FINFO_BASE = "https://finfo-api.vndirect.com.vn/v4"
 FR_URL     = f"{FINFO_BASE}/financial_reports"
@@ -73,10 +73,53 @@ def cache_set(name, obj):
 # ============================================================
 # B1) LẤY DANH SÁCH <10K TỪ SSI
 # ============================================================
-import pandas as pd
-import requests
-import time
 
+def get_tickers_under_10k_from_vnd_prices():
+    """
+    Lấy danh sách mã <10k từ VNDIRECT /v4/stock_prices
+    - Chia theo sàn HOSE/HNX/UPCOM
+    - Phân trang size nhỏ để tránh timeout
+    """
+    log("📥 VNDIRECT: stock_prices paginate để lọc <10k …")
+    markets = ["HOSE", "HNX", "UPCOM"]
+    size = 180                 # nhỏ để nhẹ server
+    max_pages = 6              # 6 * 180 ~ 1080/market
+    all_tickers = set()
+    last_err = None
+
+    for m in markets:
+        for page in range(1, max_pages + 1):
+            try:
+                params = {"q": f"market:{m}", "page": page, "size": size, "sort": "ticker"}
+                r = SESSION.get(PRICE_URL, params=params, timeout=(8, 18))
+                r.raise_for_status()
+                rows = r.json().get("data", [])
+                if not rows:
+                    break
+                df = pd.DataFrame(rows)
+                # cột giá có thể là adclose/close
+                price = None
+                for col in ["adclose", "close", "matchPrice", "price"]:
+                    if col in df.columns:
+                        price = pd.to_numeric(df[col], errors="coerce")
+                        break
+                if price is None:
+                    break
+                tks = df.loc[(price > 0) & (price < 10000), "ticker"].dropna().astype(str).str.upper().unique().tolist()
+                all_tickers.update(tks)
+                log(f"  ↳ {m} page {page}: +{len(tks)} mã (tổng tạm {len(all_tickers)})")
+                time.sleep(0.25)
+            except Exception as e:
+                last_err = e
+                log(f"⚠️ {m} page {page} lỗi: {e}")
+                # trang này lỗi thì thử trang kế, tránh kẹt
+                time.sleep(0.6)
+                continue
+
+    tks = sorted(all_tickers)
+    log(f"📊 VNDIRECT paginate xong: {len(tks)} mã <10k.")
+    return tks
+    
 def get_tickers_under_10k_from_ssi():
     """
     Lấy danh sách mã & giá từ SSI iBoard (public, không token),
@@ -166,12 +209,20 @@ def get_tickers_under_10k_from_ssi():
         log(f"⚠️ SSI(by-floor) attempt {attempt}/3 lỗi: {last_err}")
         time.sleep(1.2)
 
-    # C) dùng cache cũ nếu có
+    # C) dùng cache nếu có
     cached = cache_get("tickers_under_10k.json", ttl_sec=24*3600)
     if cached and cached.get("tickers"):
         log(f"🟡 SSI lỗi, dùng cache: {len(cached['tickers'])} mã")
         return cached["tickers"]
-
+    
+    # 👉 NEW: Fallback sang VNDIRECT phân trang nhỏ (không nặng)
+    log("🔁 Fallback: dùng VNDIRECT stock_prices (paginate nhỏ)…")
+    tks_vnd = get_tickers_under_10k_from_vnd_prices()
+    if tks_vnd:
+        log(f"✅ VNDIRECT fallback <10k: {len(tks_vnd)} mã.")
+        cache_set("tickers_under_10k.json", {"tickers": tks_vnd, "src": "vnd_price"})
+        return tks_vnd
+    
     log(f"❌ SSI không khả dụng: {last_err}")
     return []
 
