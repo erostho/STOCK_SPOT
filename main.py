@@ -9,6 +9,7 @@ import numpy as np
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -26,37 +27,78 @@ def log(msg):
 
 # ====== 1. Lấy BCTC 4 quý ======
 # session dùng chung có retry
+
 def make_session():
     s = requests.Session()
-    retries = Retry(
+    r = Retry(
         total=5, backoff_factor=0.8,
-        status_forcelist=[429, 500, 502, 503, 504],
+        status_forcelist=[429,500,502,503,504],
         allowed_methods=["GET"]
     )
-    s.mount("https://", HTTPAdapter(max_retries=retries))
-    s.mount("http://", HTTPAdapter(max_retries=retries))
+    s.mount("https://", HTTPAdapter(max_retries=r))
+    s.mount("http://",  HTTPAdapter(max_retries=r))
     return s
 
 SESSION = make_session()
 
-def get_fundamentals_latest_quarters(size=1500):
-    log("📥 Lấy BCTC từ VNDIRECT (có retry/backoff)...")
+# 1) Lấy danh sách mã có giá < 10k (lọc thô)
+def get_tickers_under_10k():
+    log("📥 Lấy danh sách mã <10k từ stock_prices…")
     params = {
-        "q": "reportType:QUARTER",
-        "size": size,                 # nhỏ hơn để tránh time-out
-        "sort": "ticker,-yearQuarter"
+        "q": "market:HOSE,HNX,UPCOM",
+        "size": 3000,
+        "sort": "ticker"
     }
     try:
-        res = SESSION.get(FR_URL, params=params, timeout=40)
-        res.raise_for_status()
-        data = res.json().get("data", [])
-        df = pd.DataFrame(data)
-        log(f"✅ Lấy {len(df)} dòng BCTC")
-        return df
+        r = SESSION.get(PRICE_URL, params=params, timeout=(10,40))
+        r.raise_for_status()
+        rows = r.json().get("data", [])
+        df = pd.DataFrame(rows)
+        # dùng giá điều chỉnh nếu có
+        price = pd.to_numeric(df.get("adClose", df.get("close")), errors="coerce")
+        tickers = df.loc[(price > 0) & (price < 10000), "ticker"].dropna().unique().tolist()
+        log(f"✅ Có {len(tickers)} mã <10k.")
+        return tickers
     except Exception as e:
-        log(f"❌ Lỗi lấy BCTC (đã retry): {e}")
+        log(f"❌ Lỗi lấy danh sách mã: {e}")
+        return []
+        
+# 2) Lấy BCTC cho từng mã (nhỏ, nhanh) và build list FA
+def get_fundamentals_latest_quarters():
+    tickers = get_tickers_under_10k()
+    out = []
+    if not tickers:
         return pd.DataFrame()
 
+    for i, tk in enumerate(tickers, 1):
+        try:
+            # chỉ lấy 6–8 quý gần nhất của 1 mã
+            params = {
+                "q": f"ticker:{tk}~reportType:QUARTER",
+                "size": 8,
+                "sort": "-yearQuarter"
+            }
+            r = SESSION.get(FR_URL, params=params, timeout=(10,40))
+            if r.status_code != 200:
+                log(f"⚠️ {tk}: HTTP {r.status_code}")
+                continue
+            data = r.json().get("data", [])
+            if not data:
+                continue
+            for row in data:
+                out.append(row)
+        except Exception as e:
+            log(f"⚠️ {tk}: lỗi BCTC {e}")
+            continue
+
+        # log tiến độ mỗi 25 mã
+        if i % 25 == 0:
+            log(f"…đã lấy {i}/{len(tickers)} mã BCTC")
+
+    df = pd.DataFrame(out)
+    log(f"✅ Lấy xong BCTC: {len(df)} dòng từ {len(tickers)} mã.")
+    return df
+    
 # ====== 2. Phân tích FA nâng cao ======
 def analyze_fa_multi(df_quarter):
     if df_quarter.empty:
