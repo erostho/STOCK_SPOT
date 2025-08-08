@@ -19,7 +19,7 @@ FR_URL     = f"{FINFO_BASE}/financial_reports"
 PRICE_URL  = f"{FINFO_BASE}/stock_prices"
 
 # FireAnt free: thay endpoint/token theo thực tế của bạn
-FIREANT_BASE = os.getenv("FIREANT_BASE", "https://api.fireant.vn")  # ví dụ
+FIREANT_BASE = os.getenv("FIREANT_BASE", "https://restv2.fireant.vn/symbols")  # ví dụ
 FIREANT_TOKEN = (os.getenv("FIREANT_TOKEN") or "").strip()
 
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
