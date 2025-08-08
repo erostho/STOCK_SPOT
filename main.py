@@ -88,8 +88,7 @@ def analyze_fa_multi(df_quarter):
             if sum(lnst_quarters[0:4]) > sum(lnst_quarters[4:8]):
                 lnst_yoy_ok = True
 		if not lnst_yoy_ok:
-            continue
-
+        	continue
         if inv_yoy and inv_yoy > 0:
             inv_growth = (inventory_latest - inv_yoy) / inv_yoy
             if inv_growth > 0.30:
