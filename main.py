@@ -430,7 +430,7 @@ def main():
         final = []
         for i, tk in enumerate(tks, 1):
             log(f"[TA-only] {i}/{len(tks)} – {tk}")
-            df = get_ohlc_days_vnd_per_ticket(tk, days=180)
+            df = get_ohlc_days_vnd_per_ticker(tk, days=180)
             if df.empty:
                 continue
             conds, score = technical_signals(df)
@@ -446,7 +446,7 @@ def main():
     for i, it in enumerate(fa_list, 1):
         tk = it["ticker"]
         log(f"[TA] {i}/{len(fa_list)} — {tk}")
-        df = get_ohlc_days_vnd_per_ticket(tk, days=180)
+        df = get_ohlc_days_vnd_per_ticker(tk, days=180)
         conds, score = technical_signals(df)
         if conds.get("enough_data") and score >= 3:
             final.append({**it, "ta_score": score})
