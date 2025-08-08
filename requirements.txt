@@ -4,3 +4,6 @@ ta
 python-dotenv
 setuptools
 numpy
+html5lib
+lxml
+beautifulsoup4
