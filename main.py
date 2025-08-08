@@ -121,55 +121,96 @@ def get_tickers_under_10k_from_vnd_prices():
     return tks
     
 import requests
+def get_tickers_under_10k_from_cafef():
+    """
+    Lấy list mã <10k từ CafeF bằng pandas.read_html (public, không token).
+    Nếu CafeF lỗi/đổi cấu trúc -> dùng cache 24h -> fallback sang VNDirect paginate nhỏ.
+    """
+    log("📥 CafeF: lấy danh sách & lọc <10k … (retry ngắn)")
+    import pandas as pd, numpy as np
 
-def get_tickers_under_10k_from_pinetree():
-    """
-    Lấy danh sách mã cổ phiếu có giá < 10,000 VNĐ từ bảng giá Pinetree
-    Trả về list mã CP dạng ['AAA', 'BBB', ...]
-    """
-    url = "https://price-api.pinetree.com.vn/api/StockBoard/Market?marketType=ALL"
+    urls = [
+        # Trang "Bảng giá" / "Thị trường" của CafeF (có table)
+        "https://cafef.vn/thi-truong-chung-khoan.chn",
+        "https://cafef.vn/du-lieu.chn",
+    ]
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Referer": "https://cafef.vn/"
     }
 
-    try:
-        res = requests.get(url, headers=headers, timeout=(8, 18))
-        res.raise_for_status()
-        data = res.json()
+    def _try_one(url):
+        # tải HTML rồi dùng read_html để bắt mọi table có thể có
+        r = requests.get(url, headers=headers, timeout=(8, 18))
+        r.raise_for_status()
+        # đọc tất cả bảng; chọn bảng nào có cột "Mã" và một cột giá
+        tables = pd.read_html(r.text, flavor="bs4", thousands='.', decimal=',', displayed_only=False)
+        for df in tables:
+            cols = [str(c).strip().lower() for c in df.columns]
+            # các tên cột phổ biến
+            sym_candidates = ["mã", "mã ck", "symbol", "ticker"]
+            price_candidates = ["giá", "giá khớp", "khớp lệnh", "close", "giá close", "price"]
 
-        tickers = []
-        for item in data.get("data", []):
-            try:
-                price = item.get("lastPrice")
-                if price is not None and price < 10000:
-                    symbol = item.get("symbol")
-                    if symbol:
-                        tickers.append(symbol)
-            except Exception as e:
-                print(f"⚠️ Lỗi đọc dữ liệu 1 mã: {e}")
+            # tìm cột mã
+            sym_idx = next((i for i,c in enumerate(cols) if c in sym_candidates), None)
+            if sym_idx is None:
+                continue
+            # tìm cột giá
+            pr_idx = next((i for i,c in enumerate(cols) if c in price_candidates), None)
+            if pr_idx is None:
+                continue
 
-        print(f"✅ Lấy từ Pinetree được {len(tickers)} mã < 10k")
-        return tickers
+            sym_col = df.columns[sym_idx]
+            pr_col  = df.columns[pr_idx]
 
-    except Exception as e:
-        print(f"❌ Lỗi khi lấy dữ liệu từ Pinetree: {e}")
+            # chuẩn hoá
+            df[sym_col] = df[sym_col].astype(str).str.upper().str.strip()
+            # ép giá số (bảng VN hay dùng dấu . ngăn nghìn, , thập phân)
+            df[pr_col] = (
+                df[pr_col].astype(str)
+                         .str.replace(r"[^\d,\.]", "", regex=True)
+                         .str.replace(".", "", regex=False)
+                         .str.replace(",", ".", regex=False)
+            )
+            price = pd.to_numeric(df[pr_col], errors="coerce")
+            tks = (df.loc[(price > 0) & (price < 10000), sym_col]
+                     .dropna().unique().tolist())
+            tks = sorted(set(tks))
+            if tks:
+                return tks
         return []
+
+    last_err = None
+    for attempt in range(1, 3+1):
+        for url in urls:
+            try:
+                tks = _try_one(url)
+                if tks:
+                    log(f"✅ CafeF <10k: {len(tks)} mã.")
+                    cache_set("tickers_under_10k.json", {"tickers": tks, "src": "cafef"})
+                    return tks
+            except Exception as e:
+                last_err = e
+        log(f"⚠️ CafeF attempt {attempt}/3 lỗi: {last_err}")
+        time.sleep(1.0)
 
     # dùng cache nếu có
     cached = cache_get("tickers_under_10k.json", ttl_sec=24*3600)
     if cached and cached.get("tickers"):
-        log(f"🟡 pinetree lỗi, dùng cache: {len(cached['tickers'])} mã")
+        log(f"🟡 CafeF lỗi, dùng cache: {len(cached['tickers'])} mã")
         return cached["tickers"]
-    
-    # 👉 NEW: Fallback sang VNDIRECT phân trang nhỏ (không nặng)
-    log("🔁 Fallback: dùng VNDIRECT stock_prices (paginate nhỏ)…")
-    tks_vnd = get_tickers_under_10k_from_vnd_prices()
-    if tks_vnd:
-        log(f"✅ VNDIRECT fallback <10k: {len(tks_vnd)} mã.")
-        cache_set("tickers_under_10k.json", {"tickers": tks_vnd, "src": "vnd_price"})
-        return tks_vnd
-    
-    log(f"❌ pinetree không khả dụng: {last_err}")
+
+    # 👉 fallback sang VNDirect paginate nhỏ (đã có sẵn trong file của bạn)
+    if 'get_tickers_under_10k_from_vnd_prices' in globals():
+        log("🔁 Fallback: dùng VNDirect stock_prices (paginate nhỏ)…")
+        tks_vnd = get_tickers_under_10k_from_vnd_prices()
+        if tks_vnd:
+            log(f"✅ VNDirect fallback <10k: {len(tks_vnd)} mã.")
+            cache_set("tickers_under_10k.json", {"tickers": tks_vnd, "src": "vnd_price"})
+            return tks_vnd
+
+    log(f"❌ CafeF không khả dụng: {last_err}")
     return []
 
 # ============================================================
@@ -362,12 +403,12 @@ def main():
     log(f"🚀 Start BOT mode={mode}")
 
     if mode == "list":
-        tks = get_tickers_under_10k_from_pinetree()
+        tks = get_tickers_under_10k_from_cafef()
         log(f"Done list: {len(tks)} mã")
         return
 
     if mode == "fa":
-        tks = get_tickers_under_10k_from_pinetree()
+        tks = get_tickers_under_10k_from_cafef()
         if not tks:
             log("⚠️ Không có tickers từ ssi. Dừng FA update.")
             return
@@ -382,7 +423,7 @@ def main():
     if not fa_list:
         # 👉 TA-only: khi FA rỗng hoặc không pass
         log("🟠 Không dùng được FA → chuyển sang TA-only.")
-        tks = get_tickers_under_10k_from_pinetree()
+        tks = get_tickers_under_10k_from_cafef()
         if not tks:
             send_telegram("⚠️ BOT: ssi/VNDirect đều không khả dụng, tạm dừng.")
             return
