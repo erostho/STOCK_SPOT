@@ -87,7 +87,7 @@ def analyze_fa_multi(df_quarter):
         elif len(lnst_quarters) >= 8:
             if sum(lnst_quarters[0:4]) > sum(lnst_quarters[4:8]):
                 lnst_yoy_ok = True
-	if not lnst_yoy_ok:
+		if not lnst_yoy_ok:
             continue
 
         if inv_yoy and inv_yoy > 0:
