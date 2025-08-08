@@ -3,7 +3,6 @@ import os
 import requests
 import pandas as pd
 import ta
-import pandas_ta as ta
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import numpy as np
