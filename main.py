@@ -1,3 +1,4 @@
+
 import os
 import requests
 import pandas as pd
@@ -57,9 +58,9 @@ def analyze_fa_multi(df_quarter):
 
         latest = sub.iloc[0].to_dict()
         price = fcol(latest, "price", 0.0)
-        eps   = fcol(latest, "eps", 0.0)
-        pe    = fcol(latest, "pe", 0.0)
-        roe   = fcol(latest, "roe", 0.0)
+        eps = fcol(latest, "eps", 0.0)
+        pe = fcol(latest, "pe", 0.0)
+        roe = fcol(latest, "roe", 0.0)
 
         lnst_quarters = pd.to_numeric(sub.get("netProfit"), errors="coerce").fillna(0.0).values.tolist()
         cfo_quarters = pd.to_numeric(sub.get("netCashFlowFromOperatingActivities"), errors="coerce").fillna(0.0).values.tolist()
@@ -68,8 +69,6 @@ def analyze_fa_multi(df_quarter):
         liabilities_latest = fcol(latest, "liabilities", 0.0)
         equity_latest = fcol(latest, "equity", 0.0)
         inv_yoy = fcol(sub.iloc[4].to_dict(), "inventory", None) if len(sub) >= 5 else None
-
-        log(f"🔍 FA {ticker}: Giá={price:.0f} EPS={eps:.0f} ROE={roe:.1f} P/E={pe:.1f}")
 
         if not (price > 0 and price < 10000):
             continue
@@ -87,8 +86,9 @@ def analyze_fa_multi(df_quarter):
         elif len(lnst_quarters) >= 8:
             if sum(lnst_quarters[0:4]) > sum(lnst_quarters[4:8]):
                 lnst_yoy_ok = True
-		if not lnst_yoy_ok:
-        	continue
+        if not lnst_yoy_ok:
+            continue
+
         if inv_yoy and inv_yoy > 0:
             inv_growth = (inventory_latest - inv_yoy) / inv_yoy
             if inv_growth > 0.30:
@@ -159,8 +159,7 @@ def technical_signals(df):
     conds["Break_20_high"] = last_close > last_20_high
 
     conds["Vol_up_3_days"] = (vol.iloc[-1] > vol.iloc[-2] > vol.iloc[-3])
-    conds["Close>MA20_VolSpike"] = (last_close > float(ma20.iloc[-1])) and \
-                                   (float(vol.iloc[-1]) > 1.5 * float(vol_ma20.iloc[-1]))
+    conds["Close>MA20_VolSpike"] = (last_close > float(ma20.iloc[-1])) and                                    (float(vol.iloc[-1]) > 1.5 * float(vol_ma20.iloc[-1]))
 
     count_true = sum(1 for v in conds.values() if v)
     conds["score_TA_true"] = count_true
@@ -174,7 +173,7 @@ def multi_confirmation_filter(fa_list, ta_min=3):
         log(f"📊 TA cho {ticker}...")
         df = get_ohlc_days(ticker, days=180)
         conds, score = technical_signals(df)
-	if not conds:
+        if not conds:
             continue
         log(f"   TA {ticker}: {conds} | Score={score}")
         if score >= ta_min:
