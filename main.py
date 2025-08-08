@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import numpy as np
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from time import sleep
 
 
 load_dotenv()
@@ -26,41 +27,62 @@ def log(msg):
     print(f"[{now}] {msg}")
 
 # ====== 1. Lấy BCTC 4 quý ======
-# session dùng chung có retry
+# 1) Lấy danh sách mã có giá < 10k (lọc thô)
+# session có retry + UA rõ ràng
 
 def make_session():
     s = requests.Session()
-    r = Retry(
-        total=5, backoff_factor=0.8,
-        status_forcelist=[429,500,502,503,504],
+    s.headers.update({"User-Agent": "vnstock-bot/1.0"})
+    retry = Retry(
+        total=6, backoff_factor=0.8,
+        status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"]
     )
-    s.mount("https://", HTTPAdapter(max_retries=r))
-    s.mount("http://",  HTTPAdapter(max_retries=r))
+    s.mount("https://", HTTPAdapter(max_retries=retry))
+    s.mount("http://",  HTTPAdapter(max_retries=retry))
     return s
 
 SESSION = make_session()
 
-# 1) Lấy danh sách mã có giá < 10k (lọc thô)
-def get_tickers_under_10k():
-    log("📥 Lấy danh sách mã <10k từ stock_prices…")
-    params = {
-        "q": "market:HOSE,HNX,UPCOM",
-        "size": 3000,
-        "sort": "ticker"
-    }
-    try:
-        r = SESSION.get(PRICE_URL, params=params, timeout=(10,40))
-        r.raise_for_status()
-        rows = r.json().get("data", [])
-        df = pd.DataFrame(rows)
-        # dùng giá điều chỉnh nếu có
-        price = pd.to_numeric(df.get("adClose", df.get("close")), errors="coerce")
-        tickers = df.loc[(price > 0) & (price < 10000), "ticker"].dropna().unique().tolist()
-        log(f"✅ Có {len(tickers)} mã <10k.")
+def _tickers_from_market(market: str) -> list:
+    """Gọi theo từng sàn để giảm tải; size nhỏ; connect/read timeout tách biệt."""
+    params = {"q": f"market:{market}", "size": 1200, "sort": "ticker"}
+    r = SESSION.get(PRICE_URL, params=params, timeout=(20, 40))  # ↑ connect-timeout
+    r.raise_for_status()
+    df = pd.DataFrame(r.json().get("data", []))
+    price = pd.to_numeric(df.get("adClose", df.get("close")), errors="coerce")
+    return df.loc[(price > 0) & (price < 10000), "ticker"].dropna().unique().tolist()
+
+def get_tickers_under_10k() -> list:
+    log("📥 Lấy danh sách mã <10k (chia theo sàn)…")
+    tickers = []
+    markets = ["HOSE", "HNX", "UPCOM"]
+    for m in markets:
+        try:
+            tks = _tickers_from_market(m)
+            log(f"  ✅ {m}: {len(tks)} mã")
+            tickers.extend(tks)
+            sleep(0.4)  # nhỏ thôi để server đỡ nghẽn
+        except Exception as e:
+            log(f"  ⚠️ {m}: lỗi stock_prices – {e}")
+    tickers = sorted(set(tickers))
+    if tickers:
+        log(f"✅ Tổng cộng {len(tickers)} mã <10k.")
         return tickers
+
+    # -------- FALLBACK: lấy từ financial_reports latest (nhẹ hơn) --------
+    log("🟡 Fallback: lấy mã <10k từ financial_reports ~isLatest:true …")
+    try:
+        params = {"q": "reportType:QUARTER~isLatest:true", "size": 1500, "sort": "ticker"}
+        r = SESSION.get(FR_URL, params=params, timeout=(20, 40))
+        r.raise_for_status()
+        df = pd.DataFrame(r.json().get("data", []))
+        price = pd.to_numeric(df.get("price"), errors="coerce")  # trường price thường có trong latest
+        tks_fb = df.loc[(price > 0) & (price < 10000), "ticker"].dropna().unique().tolist()
+        log(f"  ✅ Fallback lấy được {len(tks_fb)} mã.")
+        return tks_fb
     except Exception as e:
-        log(f"❌ Lỗi lấy danh sách mã: {e}")
+        log(f"  ❌ Fallback cũng lỗi: {e}")
         return []
         
 # 2) Lấy BCTC cho từng mã (nhỏ, nhanh) và build list FA
