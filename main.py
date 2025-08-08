@@ -1,48 +1,49 @@
 # ===========================
-#  BOT LỌC CỔ PHIẾU VIỆT NAM
-#  FA + TA (Multi-confirmation)
-#  Nguồn chính: VNDIRECT finfo-api
-#  Tối ưu: retry/backoff, cache, per-ticker
-#  Tác giả: bạn & trợ lý :)
+#  VN STOCK BOT: FireAnt + VNDIRECT
+#  B1: FireAnt -> tickers < 10k (nhẹ)
+#  B2: VNDIRECT -> FA (cache 7 ngày)
+#  B3: VNDIRECT -> TA (realtime mỗi lần scan)
 # ===========================
 
-# =====[1] IMPORTS & ENV =====
-import os, json, time
+import os, json, time, sys
 import requests
 import pandas as pd
-import ta  # thư viện chỉ báo kỹ thuật (không dùng pandas_ta)
+import ta
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-load_dotenv()
-# Cho phép dùng 2 tên biến: TELEGRAM_TOKEN hoặc TELEGRAM_BOT_TOKEN
-TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
-
+# ---------- ENV ----------
 FINFO_BASE = "https://finfo-api.vndirect.com.vn/v4"
 FR_URL     = f"{FINFO_BASE}/financial_reports"
 PRICE_URL  = f"{FINFO_BASE}/stock_prices"
 
-# In log có flush để Render hiển thị tức thời
-def log(msg: str):
-    now = datetime.now().strftime("%H:%M:%S")
-    print(f"[{now}] {msg}", flush=True)
+# FireAnt free: thay endpoint/token theo thực tế của bạn
+FIREANT_BASE = os.getenv("FIREANT_BASE", "https://api.fireant.vn")  # ví dụ
+FIREANT_TOKEN = (os.getenv("FIREANT_TOKEN") or "").strip()
 
-# =====[2] HTTP SESSION (retry/backoff) =====
+TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+
+CACHE_DIR = "/tmp/vnstock_cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+def log(msg):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+# ---------- HTTP SESSION ----------
 def make_session():
     s = requests.Session()
     s.headers.update({
         "User-Agent": "vnstock-bot/1.0",
         "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
+        "Connection": "keep-alive"
     })
     retry = Retry(
-        total=6, connect=6, read=6,
+        total=5, connect=5, read=5,
         backoff_factor=0.8,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
+        status_forcelist=[429,500,502,503,504],
+        allowed_methods=["GET"]
     )
     s.mount("https://", HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=retry))
     s.mount("http://",  HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=retry))
@@ -50,61 +51,82 @@ def make_session():
 
 SESSION = make_session()
 
-# =====[3] CACHE ĐƠN GIẢN (24h) =====
-CACHE_DIR = "/tmp/vnstock_cache"
-os.makedirs(CACHE_DIR, exist_ok=True)
-
-def cache_get(name: str, ttl_sec: int):
-    path = os.path.join(CACHE_DIR, name)
+# ---------- CACHE ----------
+def cache_get(name, ttl_sec):
+    p = os.path.join(CACHE_DIR, name)
     try:
-        if os.path.exists(path) and (time.time() - os.path.getmtime(path) < ttl_sec):
-            with open(path, "r", encoding="utf-8") as f:
+        if os.path.exists(p) and (time.time() - os.path.getmtime(p) < ttl_sec):
+            with open(p, "r", encoding="utf-8") as f:
                 return json.load(f)
     except Exception:
         pass
     return None
 
-def cache_set(name: str, obj):
-    path = os.path.join(CACHE_DIR, name)
+def cache_set(name, obj):
+    p = os.path.join(CACHE_DIR, name)
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        with open(p, "w", encoding="utf-8") as f:
             json.dump(obj, f)
     except Exception:
         pass
 
-# =====[4] LẤY DANH SÁCH <10K TỪ LATEST FA (NHẸ + CACHE) =====
-def get_tickers_under_10k():
-    # dùng cache 24h nếu có
-    cached = cache_get("tickers_under_10k.json", ttl_sec=24 * 3600)
-    if cached:
-        tks = cached.get("tickers", [])
-        log(f"✅ Dùng cache tickers: {len(tks)} mã")
-        return tks
+# ============================================================
+# B1) LẤY DANH SÁCH <10K TỪ FIREANT (NHẸ)
+# ============================================================
+def get_tickers_under_10k_from_fireant():
+    """
+    Lấy toàn thị trường từ FireAnt (endpoint ví dụ) -> lọc price < 10,000.
+    Bạn cần chỉnh endpoint/params theo token & tài liệu FireAnt free bạn có.
+    """
+    log("📥 FireAnt: lấy danh sách & lọc <10k … (retry ngắn)")
+    # ví dụ endpoint: /symbols or /prices (tùy FireAnt free của bạn)
+    url = f"{FIREANT_BASE}/symbols"
+    headers = {"Authorization": f"Bearer {FIREANT_TOKEN}"} if FIREANT_TOKEN else {}
+    params = {"type": "stock"}  # tuỳ endpoint
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            r = SESSION.get(url, headers=headers, params=params, timeout=(8, 18))
+            r.raise_for_status()
+            rows = r.json()
+            df = pd.DataFrame(rows)
+            # Chuẩn hoá: cố gắng lấy cột giá (tuỳ API: 'price', 'lastPrice', 'refPrice'…)
+            price = None
+            for col in ["price", "lastPrice", "matchPrice", "close", "refPrice"]:
+                if col in df.columns:
+                    price = pd.to_numeric(df[col], errors="coerce")
+                    break
+            if price is None:
+                raise RuntimeError("Không tìm thấy cột giá trong phản hồi FireAnt")
 
-    log("📥 Lọc mã <10k từ financial_reports (~isLatest:true)…")
-    try:
-        params = {"q": "reportType:QUARTER~isLatest:true", "size": 1500, "sort": "ticker"}
-        r = SESSION.get(FR_URL, params=params, timeout=(60, 120))
-        r.raise_for_status()
-        df = pd.DataFrame(r.json().get("data", []))
-        if df.empty:
-            raise RuntimeError("latest FA rỗng")
+            tickers = (
+                df.loc[(price > 0) & (price < 10000), "symbol"].dropna()
+                  .astype(str).str.upper().unique().tolist()
+                if "symbol" in df.columns
+                else df.loc[(price > 0) & (price < 10000), "ticker"].dropna()
+                     .astype(str).str.upper().unique().tolist()
+            )
+            tickers = sorted(tickers)
+            log(f"✅ FireAnt <10k: {len(tickers)} mã.")
+            cache_set("tickers_under_10k.json", {"tickers": tickers, "src": "fireant"})
+            return tickers
+        except Exception as e:
+            last_err = e
+            log(f"⚠️ FireAnt attempt {attempt}/3: {e}")
+            time.sleep(1.2)
 
-        price = pd.to_numeric(df.get("price"), errors="coerce")
-        tickers = (
-            df.loc[(price > 0) & (price < 10000), "ticker"]
-              .dropna().unique().tolist()
-        )
-        tickers = sorted(tickers)
-        log(f"✅ Ứng viên <10k: {len(tickers)} mã. (đã cache 24h)")
-        cache_set("tickers_under_10k.json", {"tickers": tickers})
-        return tickers
-    except Exception as e:
-        log(f"🟠 Lỗi lấy latest FA: {e} → thử dùng cache (nếu có)")
-        return cached.get("tickers", []) if cached else []
+    # Fallback: dùng cache cũ nếu có
+    cached = cache_get("tickers_under_10k.json", ttl_sec=24*3600)
+    if cached and cached.get("tickers"):
+        log(f"🟡 FireAnt lỗi, dùng cache: {len(cached['tickers'])} mã")
+        return cached["tickers"]
+    log(f"❌ FireAnt không khả dụng: {last_err}")
+    return []
 
-# =====[5] BCTC: LẤY THEO TỪNG MÃ (NHỎ, ÍT TIMEOUT) =====
-def get_fr_one_ticker(tk: str):
+# ============================================================
+# B2) FA TỪ VNDIRECT (CÓ CACHE 7 NGÀY) - CHẠY RIÊNG
+# ============================================================
+def get_fr_one_ticker_vnd(tk):
     try:
         params = {"q": f"ticker:{tk}~reportType:QUARTER", "size": 8, "sort": "-yearQuarter"}
         r = SESSION.get(FR_URL, params=params, timeout=(8, 18))
@@ -114,35 +136,33 @@ def get_fr_one_ticker(tk: str):
         log(f"⚠️ {tk} FR lỗi: {e}")
         return []
 
-def get_fundamentals_latest_quarters():
-    log("📥 Tải BCTC 8 quý / mã…")
-    tickers = get_tickers_under_10k()
+def run_fa_update(tickers):
+    """Tải FA cho list tickers và lưu cache 7 ngày: fa_cache.json"""
+    if not tickers:
+        log("❌ Không có tickers để cập nhật FA.")
+        return []
+    log(f"🧾 Cập nhật FA cho {len(tickers)} mã …")
     out = []
     for i, tk in enumerate(tickers, 1):
-        out.extend(get_fr_one_ticker(tk))
-        if i % 20 == 0:
-            log(f"…đã lấy {i}/{len(tickers)} mã BCTC")
+        out.extend(get_fr_one_ticker_vnd(tk))
+        if i % 25 == 0:
+            log(f"…đã lấy {i}/{len(tickers)} mã FA")
             time.sleep(0.3)
     df = pd.DataFrame(out)
-    log(f"✅ Tổng dòng BCTC: {len(df)}")
+    cache_set("fa_cache.json", {"rows": out, "ts": int(time.time())})
+    log(f"✅ Lưu cache FA: {len(df)} dòng (7 ngày)")
     return df
 
-# =====[6] PHÂN TÍCH FA NÂNG CAO (BẮT BUỘC) =====
-def analyze_fa_multi(df_quarter: pd.DataFrame):
-    """
-    Điều kiện FA bắt buộc:
-      - Giá < 10,000
-      - EPS > 500
-      - ROE > 10%
-      - 0 < PE < 10
-      - Nợ/Vốn < 1
-      - CFO (TTM) dương
-      - LNST tăng trưởng YoY (ưu tiên cùng kỳ; fallback TTM)
-      - Tồn kho YoY không tăng > 30%
-    """
+def load_fa_cache():
+    cached = cache_get("fa_cache.json", ttl_sec=7*24*3600)
+    if cached and cached.get("rows"):
+        return pd.DataFrame(cached["rows"])
+    return pd.DataFrame()
+
+def analyze_fa(df_quarter: pd.DataFrame):
+    """FA filter bắt buộc (giống trước): EPS>500, ROE>10, 0<PE<10, Debt/Equity<1, CFO TTM +, LNST YoY +, tồn kho YoY <=30%."""
     if df_quarter.empty:
         return []
-
     fa_pass = []
     for ticker, sub in df_quarter.groupby("ticker"):
         sub = sub.sort_values(by="yearQuarter", ascending=False).head(8)
@@ -159,37 +179,34 @@ def analyze_fa_multi(df_quarter: pd.DataFrame):
         eps   = f(latest, "eps")
         pe    = f(latest, "pe")
         roe   = f(latest, "roe")
-        inventory_latest  = f(latest, "inventory")
-        liabilities_latest= f(latest, "liabilities")
-        equity_latest     = f(latest, "equity")
+        inv   = f(latest, "inventory")
+        liab  = f(latest, "liabilities")
+        eq    = f(latest, "equity")
 
-        lnst_quarters = pd.to_numeric(sub.get("netProfit"), errors="coerce").fillna(0.0).values.tolist()
-        cfo_quarters  = pd.to_numeric(sub.get("netCashFlowFromOperatingActivities"), errors="coerce").fillna(0.0).values.tolist()
+        lnst_q = pd.to_numeric(sub.get("netProfit"), errors="coerce").fillna(0.0).values.tolist()
+        cfo_q  = pd.to_numeric(sub.get("netCashFlowFromOperatingActivities"), errors="coerce").fillna(0.0).values.tolist()
 
         inv_yoy = None
         if len(sub) >= 5:
             inv_yoy = f(sub.iloc[4].to_dict(), "inventory", None)
 
-        # Checks
-        if not (0 < price < 10000):           continue
-        if not (eps > 500):                    continue
-        if not (roe > 10):                     continue
-        if not (0 < pe < 10):                  continue
-        if equity_latest <= 0 or (liabilities_latest / equity_latest) >= 1.0:
-            continue
-        cfo_ttm = sum(cfo_quarters[:4]) if len(cfo_quarters) >= 4 else sum(cfo_quarters)
-        if cfo_ttm <= 0:                       continue
-
+        # Điều kiện
+        if not (0 < price < 10000): continue
+        if not (eps > 500): continue
+        if not (roe > 10):  continue
+        if not (0 < pe < 10): continue
+        if eq <= 0 or (liab/eq) >= 1.0: continue
+        cfo_ttm = sum(cfo_q[:4]) if len(cfo_q) >= 4 else sum(cfo_q)
+        if cfo_ttm <= 0: continue
         lnst_yoy_ok = False
-        if len(lnst_quarters) >= 5:
-            lnst_yoy_ok = lnst_quarters[0] > lnst_quarters[4]
-        elif len(lnst_quarters) >= 8:
-            lnst_yoy_ok = sum(lnst_quarters[0:4]) > sum(lnst_quarters[4:8])
-        if not lnst_yoy_ok:                    continue
-
+        if len(lnst_q) >= 5:
+            lnst_yoy_ok = lnst_q[0] > lnst_q[4]
+        elif len(lnst_q) >= 8:
+            lnst_yoy_ok = sum(lnst_q[:4]) > sum(lnst_q[4:8])
+        if not lnst_yoy_ok: continue
         if inv_yoy and inv_yoy > 0:
-            inv_growth = (inventory_latest - inv_yoy) / inv_yoy
-            if inv_growth > 0.30:              continue
+            if (inv - inv_yoy) / inv_yoy > 0.30:
+                continue
 
         fa_pass.append({
             "ticker": ticker,
@@ -201,18 +218,19 @@ def analyze_fa_multi(df_quarter: pd.DataFrame):
     log(f"✅ FA PASS: {len(fa_pass)} mã")
     return fa_pass
 
-# =====[7] OHLC: LẤY 120 PHIÊN / MÃ =====
-def get_ohlc_days(ticker: str, days: int = 120) -> pd.DataFrame:
-    start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
+# ============================================================
+# B3) TA TỪ VNDIRECT (REALTIME MỖI LẦN CHẠY)
+# ============================================================
+def get_ohlc_days_vnd(ticker, days=120):
+    start = (datetime.now() - timedelta(days=days*2)).strftime("%Y-%m-%d")
     params = {"q": f"ticker:{ticker}~date:gte:{start}", "sort": "date", "size": 1000}
     try:
         r = SESSION.get(PRICE_URL, params=params, timeout=(8, 18))
         r.raise_for_status()
         data = r.json().get("data", [])
-        if not data:
-            return pd.DataFrame()
+        if not data: return pd.DataFrame()
         df = pd.DataFrame(data)
-        for c, n in [("adOpen","open"),("adHigh","high"),("adLow","low"),("adClose","close"),("adVolume","volume")]:
+        for c,n in [("adOpen","open"),("adHigh","high"),("adLow","low"),("adClose","close"),("adVolume","volume")]:
             if c in df.columns:
                 df[n] = pd.to_numeric(df[c], errors="coerce")
         df = df[["date","open","high","low","close","volume"]].dropna().sort_values("date")
@@ -221,15 +239,14 @@ def get_ohlc_days(ticker: str, days: int = 120) -> pd.DataFrame:
         log(f"⚠️ OHLC {ticker} lỗi: {e}")
         return pd.DataFrame()
 
-# =====[8] TA: CHỈ BÁO & MULTI-CONFIRMATION (>=3/5) =====
 def technical_signals(df: pd.DataFrame):
     """
     5 điều kiện TA:
       - ADX > 20 & DI+ > DI-
       - RSI > 50 và vừa cắt lên
-      - Break đỉnh 20 phiên (close[-1] > max(close[-20:-1]))
+      - Break đỉnh 20 phiên
       - Volume tăng 3 phiên liên tiếp
-      - Close > MA20 & Volume Spike (vol > 1.5 * vol_ma20)
+      - Close > MA20 & Volume Spike
     """
     conds = {}
     if df is None or len(df) < 25:
@@ -237,23 +254,16 @@ def technical_signals(df: pd.DataFrame):
         conds["score_TA_true"] = 0
         return conds, 0
 
-    # RSI
     rsi_ind = ta.momentum.RSIIndicator(close=df["close"], window=14)
     df["rsi"] = rsi_ind.rsi()
-
-    # ADX & DI
     adx_ind = ta.trend.ADXIndicator(high=df["high"], low=df["low"], close=df["close"], window=14)
-    df["adx"]    = adx_ind.adx()
+    df["adx"] = adx_ind.adx()
     df["di_pos"] = adx_ind.adx_pos()
     df["di_neg"] = adx_ind.adx_neg()
-
-    # MA20 & Vol MA20
-    df["ma20"]     = df["close"].rolling(20).mean()
+    df["ma20"] = df["close"].rolling(20).mean()
     df["vol_ma20"] = df["volume"].rolling(20).mean()
 
-    latest = df.iloc[-1]
-    prev   = df.iloc[-2]
-
+    latest = df.iloc[-1]; prev = df.iloc[-2]
     conds["ADX>20_DI+>DI-"]   = bool((latest["adx"] > 20) and (latest["di_pos"] > latest["di_neg"]))
     conds["RSI>50_cross_up"]  = bool((latest["rsi"] > 50) and (prev["rsi"] <= 50))
     conds["Break_20_high"]    = bool(latest["close"] > float(df["close"].iloc[-20:-1].max()))
@@ -265,72 +275,80 @@ def technical_signals(df: pd.DataFrame):
     conds["score_TA_true"] = score
     return conds, score
 
-def multi_confirmation_filter(fa_list, ta_min=3):
-    final = []
-    for item in fa_list:
-        tk = item["ticker"]
-        log(f"📊 TA cho {tk}…")
-        df = get_ohlc_days(tk, days=180)
-        conds, score = technical_signals(df)
-        if not conds.get("enough_data", False):
-            log("   ⚠️ TA: dữ liệu không đủ")
-            continue
-        log(f"   TA {tk}: {conds} | Score={score}")
-        if score >= ta_min:
-            final.append({**item, "ta_score": score})
-    log(f"✅ MULTI PASS: {len(final)} mã")
-    return final
+# ============================================================
+# GỬI TELEGRAM
+# ============================================================
+def send_telegram(text):
+    token = TELEGRAM_TOKEN; chat = TELEGRAM_CHAT_ID
+    if not token or not chat:
+        log("❌ Thiếu TELEGRAM_TOKEN / TELEGRAM_CHAT_ID"); return
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        r = requests.post(url, data={"chat_id": chat, "text": text}, timeout=15)
+        if r.status_code == 200 and r.json().get("ok"):
+            log("📨 Sent Telegram.")
+        else:
+            log(f"❌ Telegram {r.status_code}: {r.text}")
+    except Exception as e:
+        log(f"❌ Telegram error: {e}")
 
-# =====[9] TELEGRAM =====
-def format_telegram_message(stocks):
+def format_msg(stocks):
     today = datetime.now().strftime("%d/%m/%Y")
     if not stocks:
-        return f"📉 [BOT CỔ PHIẾU] {today}\nKhông mã nào đạt FA + TA (multi-confirmation)."
-    msg = f"📈 [BOT CỔ PHIẾU] {today}\nMã <10.000đ đạt FA bắt buộc + TA (≥3/5):\n\n"
+        return f"📉 [{today}] Không có mã nào đạt FA + TA."
+    msg = f"📈 [{today}] Mã <10k đạt FA + TA (≥3/5):\n\n"
     for s in stocks:
-        msg += (f"🔹 {s['ticker']} | Giá: {int(s['price'])}đ | EPS: {int(s['eps'])} | "
-                f"ROE: {s['roe']:.1f}% | P/E: {s['pe']:.1f} | TA✓: {s['ta_score']}/5\n")
-    msg += "\n#vnstock #fa #ta #multi_confirmation"
+        msg += (f"• {s['ticker']} | Giá: {int(s['price'])}đ | EPS:{int(s['eps'])} "
+                f"| ROE:{s['roe']:.1f}% | P/E:{s['pe']:.1f} | TA✓:{s['ta_score']}/5\n")
     return msg
 
-def send_telegram_message(message: str):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        log("❌ Thiếu TELEGRAM_TOKEN/TELEGRAM_CHAT_ID")
-        return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        r = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=20)
-        if r.status_code == 200 and r.json().get("ok"):
-            log("📨 Đã gửi kết quả Telegram.")
-        else:
-            log(f"❌ Telegram lỗi {r.status_code}: {r.text}")
-    except Exception as e:
-        log(f"❌ Lỗi gửi Telegram: {e}")
-
-# =====[10] MAIN (CHECKPOINT LOG) =====
+# ============================================================
+# MAIN MODES
+#   - python main.py list   -> chỉ lấy danh sách <10k từ FireAnt
+#   - python main.py fa     -> cập nhật & cache FA từ VNDIRECT
+#   - python main.py scan   -> load FA cache -> quét TA realtime
+# ============================================================
 def main():
-    log("🚀 KHỞI ĐỘNG BOT — Multi-Confirmation FA+TA")
+    mode = (sys.argv[1] if len(sys.argv) > 1 else "scan").lower()
+    log(f"🚀 Start BOT mode={mode}")
 
-    log("STEP 1: Lấy BCTC từng mã")
-    df_quarter = get_fundamentals_latest_quarters()
-    log(f"STEP 1 DONE: rows={len(df_quarter)}")
+    if mode == "list":
+        tks = get_tickers_under_10k_from_fireant()
+        log(f"Done list: {len(tks)} mã")
+        return
 
-    if df_quarter.empty:
-        msg = "⚠️ BOT: Không lấy được dữ liệu BCTC hôm nay (VNDIRECT chậm). Sẽ thử lại lần sau."
-        log(msg); send_telegram_message(msg); return
+    if mode == "fa":
+        tks = get_tickers_under_10k_from_fireant()
+        if not tks:
+            log("⚠️ Không có tickers từ FireAnt. Dừng FA update.")
+            return
+        _ = run_fa_update(tks)
+        log("FA update DONE.")
+        return
 
-    log("STEP 2: Phân tích FA")
-    fa_list = analyze_fa_multi(df_quarter)
-    log(f"STEP 2 DONE: FA pass={len(fa_list)}")
+    # mode == scan (default): dùng FA cache + TA realtime
+    df_fa_cache = load_fa_cache()
+    if df_fa_cache.empty:
+        log("🟡 FA cache trống → thử cập nhật nhanh")
+        tks = get_tickers_under_10k_from_fireant()
+        df_fa_cache = run_fa_update(tks) if tks else pd.DataFrame()
 
-    log("STEP 3: Phân tích TA (multi-confirmation)")
-    final = multi_confirmation_filter(fa_list, ta_min=3)
-    log(f"STEP 3 DONE: final={len(final)}")
+    fa_list = analyze_fa(df_fa_cache)
+    if not fa_list:
+        send_telegram("⚠️ BOT: Không có mã nào qua FA (cache rỗng hoặc dữ liệu thiếu).")
+        return
 
-    log("STEP 4: Gửi Telegram")
-    msg = format_telegram_message(final)
-    send_telegram_message(msg)
-    log("ALL DONE ✅")
+    final = []
+    for i, it in enumerate(fa_list, 1):
+        tk = it["ticker"]
+        log(f"[TA] {i}/{len(fa_list)} — {tk}")
+        df = get_ohlc_days_vnd(tk, days=180)
+        conds, score = technical_signals(df)
+        if conds.get("enough_data") and score >= 3:
+            final.append({**it, "ta_score": score})
+
+    send_telegram(format_msg(final))
+    log(f"ALL DONE. Final={len(final)}")
 
 if __name__ == "__main__":
     main()
