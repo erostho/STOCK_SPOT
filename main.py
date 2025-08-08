@@ -2,9 +2,11 @@
 import os
 import requests
 import pandas as pd
+import ta
 import pandas_ta as ta
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+import numpy as np
 
 load_dotenv()
 
@@ -132,38 +134,77 @@ def get_ohlc_days(ticker, days=120):
         return pd.DataFrame()
 
 # ====== 4. Phân tích TA ======
-def technical_signals(df):
-    if df.empty or len(df) < 25:
-        return {}, 0
+# dùng lib 'ta' thay cho pandas_ta
 
-    close = df["close"].astype(float)
-    vol = df["volume"].astype(float)
+def technical_signals(df: pd.DataFrame):
+    """
+    Trả về (conds, score):
+      conds: dict các điều kiện TA (True/False)
+      score: số điều kiện đạt (>=3 là pass theo multi-confirmation)
 
-    rsi = ta.rsi(close, length=14)
-    adx_df = ta.adx(high=df["high"], low=df["low"], close=close, length=14)
-    ma20 = ta.sma(close, length=20)
-    vol_ma20 = ta.sma(vol, length=20)
-
+    Điều kiện:
+      - ADX > 20 và DI+ > DI-
+      - RSI > 50 và vừa cắt lên (rsi[-1] > 50 & rsi[-2] <= 50)
+      - Break đỉnh 20 phiên (close[-1] > max(close[-20:-1]))
+      - Volume tăng 3 phiên liên tiếp
+      - Close > MA20 và Volume Spike (vol[-1] > 1.5 * vol_ma20[-1])
+    """
     conds = {}
-    adx_val = float(adx_df.iloc[-1]["ADX_14"])
-    dip_val = float(adx_df.iloc[-1]["DMP_14"])
-    dim_val = float(adx_df.iloc[-1]["DMN_14"])
-    conds["ADX>20_DI+>DI-"] = (adx_val > 20) and (dip_val > dim_val)
 
-    rsi_curr = float(rsi.iloc[-1])
-    rsi_prev = float(rsi.iloc[-2])
-    conds["RSI>50_cross_up"] = (rsi_curr > 50) and (rsi_prev <= 50)
+    # Kiểm tra dữ liệu đủ dài
+    if df is None or len(df) < 25:
+        conds["enough_data"] = False
+        conds["score_TA_true"] = 0
+        return conds, 0
 
-    last_close = float(close.iloc[-1])
-    last_20_high = float(close.iloc[-20:-1].max())
-    conds["Break_20_high"] = last_close > last_20_high
+    # ----- Chỉ báo với thư viện 'ta'
+    # RSI(14)
+    rsi_ind = ta.momentum.RSIIndicator(close=df["close"], window=14)
+    df["rsi"] = rsi_ind.rsi()
 
-    conds["Vol_up_3_days"] = (vol.iloc[-1] > vol.iloc[-2] > vol.iloc[-3])
-    conds["Close>MA20_VolSpike"] = (last_close > float(ma20.iloc[-1])) and                                    (float(vol.iloc[-1]) > 1.5 * float(vol_ma20.iloc[-1]))
+    # ADX(14), DI+ / DI-
+    adx_ind = ta.trend.ADXIndicator(high=df["high"], low=df["low"], close=df["close"], window=14)
+    df["adx"] = adx_ind.adx()
+    df["di_pos"] = adx_ind.adx_pos()
+    df["di_neg"] = adx_ind.adx_neg()
 
-    count_true = sum(1 for v in conds.values() if v)
-    conds["score_TA_true"] = count_true
-    return conds, count_true
+    # MA20 & Vol MA20 (dùng rolling pandas cho nhẹ)
+    df["ma20"] = df["close"].rolling(20).mean()
+    df["vol_ma20"] = df["volume"].rolling(20).mean()
+
+    latest = df.iloc[-1]
+    prev   = df.iloc[-2]
+
+    # ----- 5 điều kiện TA
+    # 1) ADX > 20 & DI+ > DI-
+    conds["ADX>20_DI+>DI-"] = bool((latest["adx"] > 20) and (latest["di_pos"] > latest["di_neg"]))
+
+    # 2) RSI > 50 và cắt lên (cross up 50)
+    conds["RSI>50_cross_up"] = bool((latest["rsi"] > 50) and (prev["rsi"] <= 50))
+
+    # 3) Break đỉnh 20 phiên
+    last_20_high = float(df["close"].iloc[-20:-1].max())
+    conds["Break_20_high"] = bool(latest["close"] > last_20_high)
+
+    # 4) Volume tăng 3 phiên liên tiếp
+    try:
+        conds["Vol_up_3_days"] = bool(
+            df["volume"].iloc[-1] > df["volume"].iloc[-2] > df["volume"].iloc[-3]
+        )
+    except Exception:
+        conds["Vol_up_3_days"] = False
+
+    # 5) Close > MA20 & Volume Spike
+    conds["Close>MA20_VolSpike"] = bool(
+        (latest["close"] > latest["ma20"]) and (latest["volume"] > 1.5 * latest["vol_ma20"])
+    )
+
+    # Tính score
+    score = sum(1 for k, v in conds.items() if v)
+    conds["enough_data"] = True
+    conds["score_TA_true"] = score
+
+    return conds, score
 
 # ====== 5. Multi-confirmation ======
 def multi_confirmation_filter(fa_list, ta_min=3):
