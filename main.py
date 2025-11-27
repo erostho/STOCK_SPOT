@@ -362,7 +362,7 @@ def format_msg_fa_ta(stocks):
     today = datetime.now().strftime("%d/%m/%Y")
     if not stocks:
         return f"📉 [{today}] Không có mã nào đạt FA + TA."
-    msg = f"📈 [{today}] Mã <10k đạt FA + TA (≥3/5):\n\n"
+    msg = f"📈 [{today}] Mã CP <30k đạt FA + TA (≥3/5):\n\n"
     for s in stocks:
         msg += (
             f"• {s['ticker']} | Giá: {int(s['price'])}đ | EPS:{int(s['eps'])} "
