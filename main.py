@@ -105,7 +105,7 @@ def get_tickers_from_sheet():
                .unique()
                .tolist())
         tks = sorted(set(tks))
-        log(f"✅ Sheet lấy được {len(tks)} mã cp <10k (đã lọc sẵn).")
+        log(f"✅ Sheet lấy được {len(tks)} mã cp <30k (đã lọc sẵn).")
         return tks
     except Exception as e:
         log(f"❌ Lỗi đọc sheet: {e}")
