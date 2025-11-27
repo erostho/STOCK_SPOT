@@ -236,46 +236,32 @@ def analyze_fa(df_quarter: pd.DataFrame):
 # B3) TA: NẾN NGÀY TỪ VNDIRECT
 # ============================================================
 
-def get_ohlc_days_vnd_per_ticker(ticker: str, days: int = 180):
-    """
-    Lấy nến ngày (OHLC) từ VNDIRECT cho 1 mã.
-    Gọi từng mã, nhẹ hơn bulk.
-    """
-    tk = str(ticker).upper().strip()
-    end = datetime.utcnow().date()
-    start = end - timedelta(days=int(days * 2))  # buffer rộng
-    q = f"ticker:{tk}~date:gte:{start.isoformat()}~date:lte:{end.isoformat()}"
+def get_ohlc_days_tcbs(ticker, days=180):
+    tk = ticker.upper().strip()
+    url = f"https://apipub.tcbs.com.vn/stock-insight/v1/stock/bars/{tk}"
+    params = {"type":"stock","resolution":"1D","count":days}
 
-    last_err = None
-    for attempt in range(1, 3+1):
-        try:
-            params = {"q": q, "sort": "date", "order": "asc", "size": 1000}
-            r = SESSION.get(PRICE_URL, params=params, timeout=(10, 24))
-            r.raise_for_status()
-            rows = r.json().get("data", [])
-            if not rows:
-                raise RuntimeError("VNDIRECT trả rỗng")
+    try:
+        r = SESSION.get(url, params=params, timeout=(8,30))
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        if not data:
+            return pd.DataFrame()
 
-            df = pd.DataFrame(rows)
-            need = ["date","open","high","low","close","nmVolume"]
-            for c in need:
-                if c not in df.columns and c != "nmVolume":
-                    raise RuntimeError(f"Thiếu cột {c}")
-            df["date"] = pd.to_datetime(df["date"]).dt.date
-            if "nmVolume" in df.columns:
-                df = df.rename(columns={"nmVolume": "volume"})
-            if "volume" not in df.columns:
-                df["volume"] = pd.NA
-            df = df[["date","open","high","low","close","volume"]].dropna(subset=["close"])
-            if len(df) > days:
-                df = df.iloc[-days:].reset_index(drop=True)
-            return df
-        except Exception as e:
-            last_err = e
-            log(f"⚠️ OHLC {tk} VND attempt {attempt}/3: {e}")
-            time.sleep(0.6)
-    log(f"❌ VNDIRECT không khả dụng cho {tk}: {last_err}")
-    return pd.DataFrame()
+        df = pd.DataFrame([{
+            "date": datetime.fromtimestamp(x["time"]/1000).date(),
+            "open": x["open"],
+            "high": x["high"],
+            "low": x["low"],
+            "close": x["close"],
+            "volume": x["volume"]
+        } for x in data])
+
+        return df
+
+    except Exception as e:
+        log(f"⚠️ OHLC TCBS {tk} lỗi: {e}")
+        return pd.DataFrame()
 
 def technical_signals(df: pd.DataFrame):
     """
