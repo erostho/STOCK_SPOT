@@ -385,7 +385,7 @@ def main():
         final = []
         for i, tk in enumerate(tks, 1):
             log(f"[TA-only] {i}/{len(tks)} – {tk}")
-            df = get_ohlc_days_tcbs(ticker, days=180):
+            df = get_ohlc_days_tcbs(ticker, days=180)
             if df.empty:
                 continue
             conds, score = technical_signals(df)
