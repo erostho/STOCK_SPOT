@@ -405,6 +405,7 @@ def main():
         log("⚡ FA Update DONE.")
         return
     # ==== MODE = SCAN (mặc định) — chỉ đọc cache FA ====
+    run_fa_update_vnstock(tks)
     df_fa_cache = load_fa_cache()
     fa_list = analyze_fa(df_fa_cache) if not df_fa_cache.empty else []
 
