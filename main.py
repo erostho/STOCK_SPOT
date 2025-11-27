@@ -374,7 +374,7 @@ def format_msg_ta_only(stocks):
     today = datetime.now().strftime("%d/%m/%Y")
     if not stocks:
         return f"📉 [{today}] Không có mã nào đạt TA (≥3/5)."
-    msg = f"📈 [{today}] Mã <10k đạt TA (≥3/5) – không lọc FA:\n\n"
+    msg = f"📈 [{today}] Mã <30k đạt TA (≥3/5) – không lọc FA:\n\n"
     for s in stocks:
         msg += f"• {s['ticker']} | TA✓:{s['ta_score']}/5\n"
     return msg
