@@ -404,7 +404,7 @@ def main():
         return
 
     # 2) Cập nhật FA cache
-    if mode == "fa":
+    #if mode == "fa":
         tks = get_tickers_under_10k()
         if not tks:
             log("⚠️ Không lấy được danh sách từ sheet.")
