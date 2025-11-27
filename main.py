@@ -462,7 +462,7 @@ def main():
        #     })
 
     #send_telegram(format_msg_fa_ta(final))
-    log(f"ALL DONE. Final={len(final)}")
+    #log(f"ALL DONE. Final={len(final)}")
 
 if __name__ == "__main__":
     main()
