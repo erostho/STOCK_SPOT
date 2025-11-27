@@ -236,7 +236,7 @@ def analyze_fa(df_quarter: pd.DataFrame):
 # B3) TA: NẾN NGÀY TỪ VNDIRECT
 # ============================================================
 
-def get_ohlc_days_tcbs(ticker, days=180):
+def get_ohlc_days_tcbs(tk, days=180):
     tk = ticker.upper().strip()
     url = f"https://apipub.tcbs.com.vn/stock-insight/v1/stock/bars/{tk}"
     params = {"type":"stock","resolution":"1D","count":days}
@@ -385,7 +385,7 @@ def main():
         final = []
         for i, tk in enumerate(tks, 1):
             log(f"[TA-only] {i}/{len(tks)} – {tk}")
-            df = get_ohlc_days_tcbs(ticker, days=180)
+            df = get_ohlc_days_tcbs(tk, days=180)
             if df.empty:
                 continue
             conds, score = technical_signals(df)
