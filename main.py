@@ -237,7 +237,7 @@ def analyze_fa(df_quarter: pd.DataFrame):
 # ============================================================
 
 def get_ohlc_days_tcbs(tk, days=180):
-    tk = ticker.upper().strip()
+    tk = tk.upper().strip()
     url = f"https://apipub.tcbs.com.vn/stock-insight/v1/stock/bars/{tk}"
     params = {"type":"stock","resolution":"1D","count":days}
 
