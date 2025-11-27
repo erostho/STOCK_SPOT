@@ -472,7 +472,7 @@ def main():
                 buy_zone, tp_zone = calc_buy_tp(df)
                 if buy_zone and tp_zone:
                     final.append({
-                        **it,
+                        "ticker": tk,
                         "ta_score": score,
                         "buy_zone": buy_zone,
                         "tp_zone": tp_zone
