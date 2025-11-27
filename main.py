@@ -9,6 +9,7 @@ import os, json, time, sys
 import requests
 import pandas as pd
 import ta
+import time
 from datetime import datetime, timedelta
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -236,31 +237,65 @@ def analyze_fa(df_quarter: pd.DataFrame):
 # B3) TA: NẾN NGÀY TỪ VNDIRECT
 # ============================================================
 
-def get_ohlc_days_tcbs(tk, days=180):
+def get_ohlc_days_tcbs(tk: str, days: int = 180):
+    """
+    Lấy nến ngày từ TCBS:
+    https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term
+    """
     tk = tk.upper().strip()
-    url = f"https://apipub.tcbs.com.vn/stock-insight/v1/stock/bars/{tk}"
-    params = {"type":"stock","resolution":"1D","count":days}
+
+    # Tính khoảng thời gian cần lấy
+    end_date = datetime.now().date()
+    start_date = end_date - timedelta(days=int(days * 1.2))  # buffer rộng hơn chút
+
+    # Đổi về timestamp (second)
+    start_ts = int(time.mktime(datetime.combine(start_date, datetime.min.time()).timetuple()))
+    end_ts   = int(time.mktime(datetime.combine(end_date,   datetime.min.time()).timetuple()))
+
+    url = "https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term"
+    params = {
+        "ticker": tk,
+        "type": "stock",
+        "resolution": "D",
+        "from": start_ts,
+        "to": end_ts,
+    }
 
     try:
-        r = SESSION.get(url, params=params, timeout=(8,30))
+        r = SESSION.get(url, params=params, timeout=(8, 20))
+        if r.status_code == 404:
+            log(f"⛔ TCBS không có dữ liệu cho {tk}, bỏ qua.")
+            return pd.DataFrame()
         r.raise_for_status()
         data = r.json().get("data", [])
         if not data:
+            log(f"🟡 TCBS trả rỗng cho {tk}.")
             return pd.DataFrame()
 
-        df = pd.DataFrame([{
-            "date": datetime.fromtimestamp(x["time"]/1000).date(),
-            "open": x["open"],
-            "high": x["high"],
-            "low": x["low"],
-            "close": x["close"],
-            "volume": x["volume"]
-        } for x in data])
+        df = pd.DataFrame(data)
+
+        # TCBS thường trả: open, high, low, close, volume, tradingDate
+        if "tradingDate" not in df.columns:
+            log(f"🟡 TCBS thiếu cột tradingDate cho {tk}.")
+            return pd.DataFrame()
+
+        df["date"] = pd.to_datetime(df["tradingDate"].str.split("T", expand=True)[0]).dt.date
+
+        # Đảm bảo đủ cột OHLCV
+        for col in ["open", "high", "low", "close", "volume"]:
+            if col not in df.columns:
+                df[col] = pd.NA
+
+        df = df[["date", "open", "high", "low", "close", "volume"]].dropna(subset=["close"])
+
+        # Cắt đúng số ngày cần dùng
+        if len(df) > days:
+            df = df.iloc[-days:].reset_index(drop=True)
 
         return df
 
     except Exception as e:
-        log(f"⚠️ OHLC TCBS {tk} lỗi: {e}")
+        log(f"⚠️ OHLC TCBS lỗi {tk}: {e}")
         return pd.DataFrame()
 
 def technical_signals(df: pd.DataFrame):
@@ -401,7 +436,7 @@ def main():
     for i, it in enumerate(fa_list, 1):
         tk = it["ticker"]
         log(f"[FA+TA] {i}/{len(fa_list)} — {tk}")
-        df = get_ohlc_days_vnd_per_ticker(tk, days=180)
+        df = get_ohlc_days_tcbs(tk, days=180)
         if df.empty:
             continue
         conds, score = technical_signals(df)
