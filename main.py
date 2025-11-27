@@ -390,37 +390,23 @@ def main():
     if not tks:
         log("⚠️ Không lấy được danh sách mã từ Sheet.")
         return
-    # ==== CHỈ UPDATE FA LÚC 19H THỨ 6 (GIỜ VIỆT NAM) ====
-    # Giả sử cron của bạn chạy MỖI NGÀY lúc 19h VN (12h UTC)
+    # ==== FA AUTO: chỉ update FA lúc 19h Thứ 6 VN ====
     now_utc = datetime.utcnow()
-    now_vn  = now_utc + timedelta(hours=7)   # đổi sang giờ VN
-
-    if now_vn.weekday() == 4 and now_vn.hour == 19:   # 4 = Friday, 19h
+    now_vn  = now_utc + timedelta(hours=7)
+    if now_vn.weekday() == 4 and now_vn.hour == 19:   # 4 = Friday
         log("🔄 Thứ 6 19h VN → CẬP NHẬT FA (vnstock)…")
-        run_fa_update_vnstock(tks)   # chỉ chạy ở thời điểm này
+        run_fa_update_vnstock(tks)
     else:
         log("⏭ Không phải 19h Thứ 6 → dùng FA cache cũ, không update.")
-    # ==== MODE FA: chỉ cập nhật FA rồi dừng ====
+    # ==== MODE = FA: cho phép bạn tự chạy bằng tay (python main.py fa) ====
     if mode == "fa":
-        log("🔄 Cập nhật FA (vnstock) cho danh sách mã …")
-        run_fa_update_vnstock(tks)     # <-- CẬP NHẬT FA & LƯU CACHE
-        log("FA update DONE.")
+        log("🔄 MODE=fa → Cập nhật FA (vnstock) theo yêu cầu …")
+        run_fa_update_vnstock(tks)
+        log("⚡ FA Update DONE.")
         return
-
-    # --- mode: scan (FA + TA nếu có FA, else TA-only) ---
-    # log("🔄 Cập nhật FA (vnstock) trước khi scan TA…")
-    # run_fa_update_vnstock(tks)
-    
+    # ==== MODE = SCAN (mặc định) — chỉ đọc cache FA ====
     df_fa_cache = load_fa_cache()
     fa_list = analyze_fa(df_fa_cache) if not df_fa_cache.empty else []
-
-    # --- mode: scan (FA + TA nếu có FA, else TA-only) ---
-    if mode == "scan":
-        log("🔄 Cập nhật FA (vnstock) trước khi scan TA…")
-        run_fa_update_vnstock(tks)   # ✅ luôn update FA trước
-    
-        df_fa_cache = load_fa_cache()
-        fa_list = analyze_fa(df_fa_cache) if not df_fa_cache.empty else []
 
     if not fa_list:
         log("🟠 Không dùng được FA (cache rỗng hoặc không mã nào pass) → TA-only.")
