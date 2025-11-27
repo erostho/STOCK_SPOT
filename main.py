@@ -7,9 +7,10 @@
 
 import os, sys, json, time
 from datetime import datetime, timedelta
-
 import requests
 import pandas as pd
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 import ta
 from vnstock import Vnstock  # pip install vnstock
 
