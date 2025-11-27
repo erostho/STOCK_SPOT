@@ -334,6 +334,32 @@ def technical_signals(df: pd.DataFrame):
     conds["enough_data"] = True
     conds["score_TA_true"] = score
     return conds, score
+def calc_buy_tp(df):
+    """
+    Buy zone = MA20 ± 3%
+    TP zone  = Fibonacci extension 1.618 – 2.0 từ Swing High
+    """
+    if df is None or len(df) < 30:
+        return None, None
+
+    latest = df.iloc[-1]
+    ma20 = latest["ma20"]
+
+    if pd.isna(ma20) or ma20 <= 0:
+        return None, None
+
+    # --- Buy zone ---
+    buy_low  = round(ma20 * 0.97)
+    buy_high = round(ma20 * 1.03)
+
+    # --- TP zone (Fibonacci extension) ---
+    # Swing High = đỉnh cao nhất 20 phiên gần nhất
+    swing_high = max(df["close"].iloc[-20:])
+
+    tp_low  = round(swing_high * 1.618)  # Fibo 161.8%
+    tp_high = round(swing_high * 2.0)    # Fibo 200%
+
+    return (buy_low, buy_high), (tp_low, tp_high)
 
 # ============================================================
 # TELEGRAM FORMAT & SEND
@@ -354,26 +380,51 @@ def send_telegram(text):
         log(f"❌ Telegram error: {e}")
 
 def format_msg_fa_ta(stocks):
+    """
+    Mỗi mã 1 dòng:
+    MÃ; BUY_LOW-BUY_HIGH; TP_LOW-TP_HIGH
+    (Áp dụng cho các mã đạt FA + TA)
+    """
     today = datetime.now().strftime("%d/%m/%Y")
+
     if not stocks:
-        return f"📉 [{today}] Không có mã nào đạt FA (vnstock) + TA (≥3/5)."
-    msg = f"📈 [{today}] Mã <10k đạt FA (vnstock) + TA (≥3/5):\n\n"
+        return f"📉 [{today}] Không có mã nào đạt FA + TA (≥3/5)."
+
+    lines = []
     for s in stocks:
-        de_txt = f"{s['de']:.2f}" if s.get("de") is not None else "N/A"
-        msg += (
-            f"• {s['ticker']} | EPS:{int(s['eps'])} | ROE:{s['roe']:.1f}% "
-            f"| P/E:{s['pe']:.1f} | D/E:{de_txt} | TA✓:{s['ta_score']}/5\n"
-        )
+        tk  = s["ticker"]
+        buy = s.get("buy_zone")
+        tp  = s.get("tp_zone")
+
+        if buy and tp:
+            lines.append(f"{tk}; {buy[0]}-{buy[1]}; {tp[0]}-{tp[1]}")
+
+    msg = f"💹 [{today}] Mã <30k đạt FA + TA (≥3/5):\n" + "\n".join(lines)
     return msg
 
+
 def format_msg_ta_only(stocks):
+    """
+    Mỗi mã 1 dòng:
+    MÃ; BUY_LOW-BUY_HIGH; TP_LOW-TP_HIGH
+    """
     today = datetime.now().strftime("%d/%m/%Y")
+
     if not stocks:
-        return f"📉 [{today}] Mã CP <30k đạt TA (≥3/5) – không lọc FA."
-    msg = f"📊 [{today}] Mã CP <30k đạt TA (≥3/5) – không lọc FA:\n\n"
+        return f"📉 [{today}] Không có mã nào đạt TA (≥3/5)."
+
+    lines = []
     for s in stocks:
-        msg += f"• {s['ticker']} | TA✓:{s['ta_score']}/5\n"
+        tk  = s["ticker"]
+        buy = s.get("buy_zone")
+        tp  = s.get("tp_zone")
+
+        if buy and tp:
+            lines.append(f"{tk}; {buy[0]}-{buy[1]}; {tp[0]}-{tp[1]}")
+
+    msg = f"📈 [{today}] Mã <30k đạt TA (≥3/5):\n" + "\n".join(lines)
     return msg
+
 
 # ============================================================
 # MAIN
@@ -405,7 +456,6 @@ def main():
         log("⚡ FA Update DONE.")
         return
     # ==== MODE = SCAN (mặc định) — chỉ đọc cache FA ====
-    run_fa_update_vnstock(tks)
     df_fa_cache = load_fa_cache()
     fa_list = analyze_fa(df_fa_cache) if not df_fa_cache.empty else []
 
@@ -419,7 +469,15 @@ def main():
                 continue
             conds, score = technical_signals(df)
             if conds.get("enough_data") and score >= 3:
-                final.append({"ticker": tk, "ta_score": score})
+                buy_zone, tp_zone = calc_buy_tp(df)
+                if buy_zone and tp_zone:
+                    final.append({
+                        **it,
+                        "ta_score": score,
+                        "buy_zone": buy_zone,
+                        "tp_zone": tp_zone
+                    })
+
             time.sleep(0.15)
         send_telegram(format_msg_ta_only(final))
         log(f"ALL DONE (TA-only). Final={len(final)}")
@@ -435,7 +493,15 @@ def main():
             continue
         conds, score = technical_signals(df)
         if conds.get("enough_data") and score >= 3:
-            final.append({**it, "ta_score": score})
+            buy_zone, tp_zone = calc_buy_tp(df)
+            if buy_zone and tp_zone:
+                final.append({
+                    **it,
+                    "ta_score": score,
+                    "buy_zone": buy_zone,
+                    "tp_zone": tp_zone
+                })
+
         time.sleep(0.15)
 
     send_telegram(format_msg_fa_ta(final))
