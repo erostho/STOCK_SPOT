@@ -26,7 +26,9 @@ TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 # Ví dụ: https://docs.google.com/spreadsheets/d/<ID>/export?format=csv&gid=0
 SHEET_CSV_URL = (os.getenv("SHEET_CSV_URL") or "").strip()
 
-CACHE_DIR = "/tmp/vnstock_cache"
+import os
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CACHE_DIR = os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 def log(msg: str):
