@@ -1,9 +1,8 @@
 # ===========================
-#  VN STOCK BOT: FireAnt + VNDIRECT + Google Sheet
-#  B1: Google Sheet -> danh sách mã
-#      FireAnt      -> lấy giá hiện tại, lọc mã < 10k
-#  B2: VNDIRECT     -> FA (cache 7 ngày)
-#  B3: FireAnt      -> TA (OHLC, realtime mỗi lần scan; fallback: VNDIRECT)
+#  VN STOCK BOT: GOOGLE SHEET + VNDIRECT
+#  - Google Sheet: danh sách mã cổ phiếu < 10.000đ (đã lọc sẵn)
+#  - VNDIRECT: FA (financial_reports) + TA (stock_prices per ticker)
+#  - Không dùng FireAnt nữa
 # ===========================
 
 import os, json, time, sys
@@ -19,22 +18,17 @@ FINFO_BASE = "https://finfo-api.vndirect.com.vn/v4"
 FR_URL     = f"{FINFO_BASE}/financial_reports"
 PRICE_URL  = f"{FINFO_BASE}/stock_prices"
 
-# FireAnt free: thay endpoint/token theo thực tế của bạn
-# Ví dụ: FIREANT_BASE="https://restv2.fireant.vn/symbols"
-FIREANT_BASE  = os.getenv("FIREANT_BASE", "https://restv2.fireant.vn/symbols")
-FIREANT_TOKEN = (os.getenv("FIREANT_TOKEN") or "").strip()
-
-# Google Sheet CSV (public)
-# Ví dụ: https://docs.google.com/spreadsheets/d/<ID>/gviz/tq?tqx=out:csv&sheet=DANH%20MỤC%20CP
-SHEET_CSV_URL = (os.getenv("SHEET_CSV_URL") or "").strip()
-
 TELEGRAM_TOKEN   = (os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+
+# URL CSV của Google Sheet (đã lọc sẵn cp <10k)
+# Ví dụ: https://docs.google.com/spreadsheets/d/<ID>/export?format=csv&gid=0
+SHEET_CSV_URL = (os.getenv("SHEET_CSV_URL") or "").strip()
 
 CACHE_DIR = "/tmp/vnstock_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-def log(msg):
+def log(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 # ---------- HTTP SESSION ----------
@@ -77,36 +71,32 @@ def cache_set(name, obj):
         pass
 
 # ============================================================
-# B1) DANH SÁCH MÃ TỪ GOOGLE SHEET + LỌC GIÁ <10K QUA FIREANT
+# B1) DANH SÁCH MÃ TỪ GOOGLE SHEET (ĐÃ LỌC SẴN <10.000đ)
 # ============================================================
 
 def get_tickers_from_sheet():
     """
-    Đọc Google Sheet (CSV) để lấy danh sách mã cổ phiếu.
-    Chỉ cần 1 cột chứa mã (Mã / Ticker / Symbol / Code ...).
+    Đọc Google Sheet CSV, lấy danh sách mã cổ phiếu.
+    Sheet của bạn đã là cp <10.000đ nên KHÔNG lọc lại theo giá nữa.
     """
     url = SHEET_CSV_URL
     if not url:
-        log("⚠️ SHEET_CSV_URL chưa cấu hình. Vào Google Sheet -> Share: Anyone with link (Viewer) -> lấy link CSV gviz.")
+        log("❌ SHEET_CSV_URL chưa cấu hình.")
         return []
 
     try:
-        df = pd.read_csv(url)
+        df = pd.read_csv(url, engine="python", on_bad_lines="skip")
 
-        # đoán cột mã
-        col_ticker = None
-        for name in df.columns:
-            if str(name).strip().lower() in ["mã", "ma", "ticker", "symbol", "code"]:
-                col_ticker = name
+        # Tìm cột 'Mã' hoặc các tên tương đương
+        col = None
+        for c in df.columns:
+            if str(c).strip().lower() in ["mã", "ma", "ticker", "symbol", "code"]:
+                col = c
                 break
-        if col_ticker is None and df.shape[1] >= 1:
-            col_ticker = df.columns[0]  # fallback: cột đầu
+        if col is None:
+            col = df.columns[0]  # fallback: cột đầu tiên
 
-        if col_ticker is None:
-            log("❌ Không tìm thấy cột mã trong sheet.")
-            return []
-
-        tks = (df[col_ticker]
+        tks = (df[col]
                .astype(str)
                .str.upper()
                .str.strip()
@@ -114,140 +104,32 @@ def get_tickers_from_sheet():
                .unique()
                .tolist())
         tks = sorted(set(tks))
-        log(f"✅ Sheet lấy được {len(tks)} mã.")
+        log(f"✅ Sheet lấy được {len(tks)} mã cp <10k (đã lọc sẵn).")
         return tks
     except Exception as e:
         log(f"❌ Lỗi đọc sheet: {e}")
         return []
 
-def get_last_price_fireant(ticker: str) -> float:
+def get_tickers_under_10k(refresh: bool = False):
     """
-    Lấy giá hiện tại của 1 mã từ FireAnt.
-    ⚠️ Bạn cần test JSON thực tế của FireAnt rồi chỉnh phần mapping field ở dưới cho khớp.
+    Hàm chuẩn để dùng trong main().
+    Hiện tại: chỉ lấy từ Google Sheet, cache 30 phút.
     """
-    tk = str(ticker).upper().strip()
-    url = f"{FIREANT_BASE.rstrip('/')}/{tk}"
-
-    headers = {}
-    if FIREANT_TOKEN:
-        headers["Authorization"] = f"Bearer {FIREANT_TOKEN}"
-
-    try:
-        r = SESSION.get(url, headers=headers, timeout=(8, 15))
-        r.raise_for_status()
-        data = r.json()
-
-        # Trường hợp FireAnt trả dict đơn
-        if isinstance(data, dict):
-            for key in ["lastPrice", "matchPrice", "price", "close"]:
-                if key in data and data[key] is not None:
-                    return float(data[key])
-
-        # Trường hợp FireAnt trả dict có "data": [ ... ]
-        if isinstance(data, dict) and "data" in data and data["data"]:
-            row = data["data"][0]
-            for key in ["lastPrice", "matchPrice", "price", "close"]:
-                if key in row and row[key] is not None:
-                    return float(row[key])
-
-        # Trường hợp trả list
-        if isinstance(data, list) and data:
-            row = data[0]
-            if isinstance(row, dict):
-                for key in ["lastPrice", "matchPrice", "price", "close"]:
-                    if key in row and row[key] is not None:
-                        return float(row[key])
-
-        return 0.0
-    except Exception as e:
-        log(f"⚠️ FireAnt giá {tk} lỗi: {e}")
-        return 0.0
-
-def get_tickers_under_10k_from_sheet_plus_fireant(refresh: bool = False):
-    """
-    Lấy list mã từ Google Sheet, sau đó gọi FireAnt lấy giá
-    và lọc những mã có giá < 10.000đ.
-    Có cache 1 giờ.
-    """
-    cache_name = "tickers_under_10k_sheet_fireant.json"
+    cache_name = "tickers_from_sheet.json"
     if not refresh:
-        cached = cache_get(cache_name, ttl_sec=3600)
+        cached = cache_get(cache_name, ttl_sec=1800)  # 30 phút
         if cached and cached.get("tickers"):
-            log(f"🟢 Dùng cache tickers <10k từ sheet+FireAnt: {len(cached['tickers'])} mã")
+            log(f"🟢 Dùng cache tickers từ sheet: {len(cached['tickers'])} mã")
             return cached["tickers"]
 
     tks = get_tickers_from_sheet()
-    if not tks:
-        return []
-
-    final = []
-    for i, tk in enumerate(tks, 1):
-        if i % 20 == 1:
-            log(f"…check giá FireAnt {i}/{len(tks)}")
-        price = get_last_price_fireant(tk)
-        if 0 < price < 10000:
-            final.append(tk)
-        time.sleep(0.15)  # tránh spam API
-
-    final = sorted(set(final))
-    cache_set(cache_name, {"tickers": final, "src": "sheet+fireant"})
-    log(f"✅ Lọc xong: {len(final)} mã <10k từ sheet+FireAnt.")
-    return final
-
-# ---- (tuỳ bạn, phần dưới dùng VNDIRECT lấy tickers có thể giữ lại để sau xài, hiện tại không dùng) ----
-def get_tickers_under_10k_from_vnd_prices():
-    """
-    (HIỆN TẠI KHÔNG DÙNG do finfo-api VNDIRECT hay timeout trên Render)
-    Lấy danh sách mã <10k từ VNDIRECT /v4/stock_prices.
-    Giữ lại để sau nếu chuyển server khác thì dùng.
-    """
-    log("📥 VNDIRECT: stock_prices paginate để lọc <10k …")
-    markets = ["HOSE", "HNX", "UPCOM"]
-    size = 180
-    max_pages = 6
-    all_tickers = set()
-    last_err = None
-
-    for m in markets:
-        for page in range(1, max_pages + 1):
-            try:
-                params = {"q": f"market:{m}", "page": page, "size": size, "sort": "ticker"}
-                r = SESSION.get(PRICE_URL, params=params, timeout=(8, 18))
-                r.raise_for_status()
-                rows = r.json().get("data", [])
-                if not rows:
-                    break
-                df = pd.DataFrame(rows)
-                price = None
-                for col in ["adclose", "close", "matchPrice", "price"]:
-                    if col in df.columns:
-                        price = pd.to_numeric(df[col], errors="coerce")
-                        break
-                if price is None:
-                    break
-                tks = df.loc[(price > 0) & (price < 10000), "ticker"].dropna().astype(str).str.upper().unique().tolist()
-                all_tickers.update(tks)
-                log(f"  ↳ {m} page {page}: +{len(tks)} mã (tổng tạm {len(all_tickers)})")
-                time.sleep(0.25)
-            except Exception as e:
-                last_err = e
-                log(f"⚠️ {m} page {page} lỗi: {e}")
-                time.sleep(0.6)
-                continue
-
-    tks = sorted(all_tickers)
-    log(f"📊 VNDIRECT paginate xong: {len(tks)} mã <10k.")
+    cache_set(cache_name, {"tickers": tks})
     return tks
 
-def get_tickers_under_10k(refresh: bool = False):
-    """
-    Hàm chuẩn dùng trong main():
-      → Ưu tiên: Google Sheet + FireAnt (không đụng VNDIRECT)
-    """
-    return get_tickers_under_10k_from_sheet_plus_fireant(refresh=refresh)
 # ============================================================
 # B2) FA TỪ VNDIRECT (CÓ CACHE 7 NGÀY)
 # ============================================================
+
 def get_fr_one_ticker_vnd(tk):
     try:
         params = {"q": f"ticker:{tk}~reportType:QUARTER", "size": 8, "sort": "-yearQuarter"}
@@ -283,7 +165,7 @@ def load_fa_cache():
 
 def analyze_fa(df_quarter: pd.DataFrame):
     """
-    FA filter bắt buộc:
+    FA filter:
       - 0 < price < 10000
       - EPS > 500
       - ROE > 10
@@ -351,102 +233,17 @@ def analyze_fa(df_quarter: pd.DataFrame):
     return fa_pass
 
 # ============================================================
-# B3) TA: FIREANT LÀ CHÍNH, FALLBACK VNDIRECT
+# B3) TA: NẾN NGÀY TỪ VNDIRECT
 # ============================================================
-
-def get_ohlc_days_fireant(ticker: str, days: int = 180):
-    """
-    Lấy nến ngày (OHLC) từ FireAnt cho 1 mã.
-    ⚠️ Cần chỉnh mapping field theo JSON thực tế FireAnt.
-    """
-    tk = str(ticker).upper().strip()
-    end = datetime.utcnow().date()
-    start = end - timedelta(days=int(days * 2))  # lấy rộng rồi cắt sau
-
-    # Ví dụ endpoint: https://restv2.fireant.vn/symbols/CII/history
-    url = f"{FIREANT_BASE.rstrip('/')}/{tk}/history"
-
-    from_ts = int(datetime.combine(start, datetime.min.time()).timestamp())
-    to_ts   = int(datetime.combine(end,   datetime.min.time()).timestamp())
-
-    params = {
-        "resolution": "1D",
-        "from": from_ts,
-        "to": to_ts,
-    }
-
-    headers = {}
-    if FIREANT_TOKEN:
-        headers["Authorization"] = f"Bearer {FIREANT_TOKEN}"
-
-    last_err = None
-    for attempt in range(1, 3 + 1):
-        try:
-            r = SESSION.get(url, params=params, headers=headers, timeout=(10, 24))
-            r.raise_for_status()
-            raw = r.json()
-
-            if isinstance(raw, dict) and "data" in raw:
-                rows = raw["data"]
-            else:
-                rows = raw
-
-            if not rows:
-                raise RuntimeError("FireAnt trả rỗng")
-
-            df = pd.DataFrame(rows)
-
-            rename_map = {}
-            for col in df.columns:
-                lc = col.lower()
-                if lc in ("date", "time", "tradingdate"):
-                    rename_map[col] = "date"
-                elif lc in ("open", "priceopen"):
-                    rename_map[col] = "open"
-                elif lc in ("high", "pricehigh"):
-                    rename_map[col] = "high"
-                elif lc in ("low", "pricelow"):
-                    rename_map[col] = "low"
-                elif lc in ("close", "priceclose", "matchprice", "lastprice"):
-                    rename_map[col] = "close"
-                elif lc in ("volume", "totalvolume", "matchvolume"):
-                    rename_map[col] = "volume"
-
-            df = df.rename(columns=rename_map)
-
-            if "date" in df.columns:
-                df["date"] = pd.to_datetime(df["date"]).dt.date
-            else:
-                raise RuntimeError("FireAnt thiếu cột date/time")
-
-            for c in ["open", "high", "low", "close", "volume"]:
-                if c not in df.columns:
-                    df[c] = pd.NA
-
-            df = df[["date", "open", "high", "low", "close", "volume"]].dropna(subset=["close"])
-            df = df.sort_values("date")
-
-            if len(df) > days:
-                df = df.iloc[-days:].reset_index(drop=True)
-
-            return df
-
-        except Exception as e:
-            last_err = e
-            log(f"⚠️ OHLC {tk} FireAnt attempt {attempt}/3: {e}")
-            time.sleep(0.6)
-
-    log(f"❌ FireAnt không khả dụng cho {tk}: {last_err}")
-    return pd.DataFrame()
 
 def get_ohlc_days_vnd_per_ticker(ticker: str, days: int = 180):
     """
     Lấy nến ngày (OHLC) từ VNDIRECT cho 1 mã.
-    Dùng làm fallback khi FireAnt lỗi.
+    Gọi từng mã, nhẹ hơn bulk.
     """
     tk = str(ticker).upper().strip()
     end = datetime.utcnow().date()
-    start = end - timedelta(days=int(days * 2))
+    start = end - timedelta(days=int(days * 2))  # buffer rộng
     q = f"ticker:{tk}~date:gte:{start.isoformat()}~date:lte:{end.isoformat()}"
 
     last_err = None
@@ -479,15 +276,6 @@ def get_ohlc_days_vnd_per_ticker(ticker: str, days: int = 180):
             time.sleep(0.6)
     log(f"❌ VNDIRECT không khả dụng cho {tk}: {last_err}")
     return pd.DataFrame()
-
-def get_ohlc_days(ticker: str, days: int = 180):
-    """
-    Wrapper: ưu tiên FireAnt, nếu fail thì fallback về VNDIRECT.
-    """
-    df = get_ohlc_days_fireant(ticker, days)
-    if df.empty:
-        df = get_ohlc_days_vnd_per_ticker(ticker, days)
-    return df
 
 def technical_signals(df: pd.DataFrame):
     """
@@ -533,7 +321,7 @@ def technical_signals(df: pd.DataFrame):
 # ============================================================
 # GỬI TELEGRAM
 # ============================================================
-def send_telegram(text):
+def send_telegram(text: str):
     token = TELEGRAM_TOKEN
     chat  = TELEGRAM_CHAT_ID
     if not token or not chat:
@@ -549,7 +337,7 @@ def send_telegram(text):
     except Exception as e:
         log(f"❌ Telegram error: {e}")
 
-def format_msg(stocks):
+def format_msg_fa_ta(stocks):
     today = datetime.now().strftime("%d/%m/%Y")
     if not stocks:
         return f"📉 [{today}] Không có mã nào đạt FA + TA."
@@ -572,15 +360,16 @@ def format_msg_ta_only(stocks):
 
 # ============================================================
 # MAIN MODES
-#   - python main.py list   -> chỉ lấy danh sách <10k từ Sheet+FireAnt
+#   - python main.py list   -> chỉ lấy danh sách mã từ Sheet
 #   - python main.py fa     -> cập nhật & cache FA từ VNDIRECT
-#   - python main.py scan   -> load FA cache -> quét TA FireAnt/VND + gửi Telegram
+#   - python main.py scan   -> load FA cache -> quét TA + gửi Telegram
 # ============================================================
+
 def main():
     mode = (sys.argv[1] if len(sys.argv) > 1 else "scan").lower()
     log(f"🚀 Start BOT mode={mode}")
 
-    # 1) Chỉ in danh sách mã <10k
+    # 1) Xem nhanh danh sách mã
     if mode == "list":
         tks = get_tickers_under_10k()
         log(f"Done list: {len(tks)} mã")
@@ -590,7 +379,7 @@ def main():
     if mode == "fa":
         tks = get_tickers_under_10k()
         if not tks:
-            log("⚠️ Không có tickers từ Sheet+FireAnt. Dừng FA update.")
+            log("⚠️ Không lấy được danh sách từ sheet.")
             return
         _ = run_fa_update(tks)
         log("FA update DONE.")
@@ -602,15 +391,15 @@ def main():
 
     if not fa_list:
         # 👉 TA-only: khi FA rỗng hoặc không pass
-        log("🟠 Không dùng được FA → chuyển sang TA-only.")
+        log("🟠 Không dùng được FA → TA-only.")
         tks = get_tickers_under_10k()
         if not tks:
-            send_telegram("⚠️ BOT: không lấy được danh sách mã <10k từ Sheet+FireAnt, tạm dừng.")
+            send_telegram("⚠️ BOT: không lấy được danh sách mã từ sheet.")
             return
         final = []
         for i, tk in enumerate(tks, 1):
             log(f"[TA-only] {i}/{len(tks)} – {tk}")
-            df = get_ohlc_days(tk, days=180)
+            df = get_ohlc_days_vnd_per_ticker(tk, days=180)
             if df.empty:
                 continue
             conds, score = technical_signals(df)
@@ -626,7 +415,7 @@ def main():
     for i, it in enumerate(fa_list, 1):
         tk = it["ticker"]
         log(f"[FA+TA] {i}/{len(fa_list)} — {tk}")
-        df = get_ohlc_days(tk, days=180)
+        df = get_ohlc_days_vnd_per_ticker(tk, days=180)
         if df.empty:
             continue
         conds, score = technical_signals(df)
@@ -640,7 +429,8 @@ def main():
                 "price": last_close,
                 "ta_score": score
             })
-    send_telegram(format_msg(final))
+
+    send_telegram(format_msg_fa_ta(final))
     log(f"ALL DONE. Final={len(final)}")
 
 if __name__ == "__main__":
