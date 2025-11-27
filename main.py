@@ -12,7 +12,8 @@ import pandas as pd
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 import ta
-from vnstock import Vnstock  # pip install vnstock
+from vnstock import Vnstock, Quote
+
 
 # ---------- ENV & CACHE DIR ----------
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
@@ -71,25 +72,30 @@ def cache_set(name, obj):
         pass
 def get_monthly_returns_vnstock(ticker, years=10):
     """
-    Lấy dữ liệu 1D ~10 năm, tính lợi nhuận trung bình theo tháng (1..12)
-    return: dict {month:int -> avg_return:float}
+    Lấy dữ liệu 1D ~10 năm bằng vnstock Quote.history,
+    tính lợi nhuận trung bình theo tháng (1..12)
     """
     try:
-        v = Vnstock(ticker, source='TCBS')
+        tk = str(ticker).upper().strip()
+        quote = Quote(symbol=tk, source='VCI')   # hoặc 'TCBS' cũng được
+
         end = datetime.now().date()
-        start = end - timedelta(days=365*years)
-        df = v.stock_historical_data(start=start.strftime("%Y-%m-%d"),
-                                     end=end.strftime("%Y-%m-%d"),
-                                     interval='1D')
+        start = end - timedelta(days=365 * years)
+
+        df = quote.history(
+            start=start.strftime("%Y-%m-%d"),
+            end=end.strftime("%Y-%m-%d"),
+            interval='1D'
+        )
         if df is None or df.empty:
             return {}
 
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date")
-        df["year"] = df["date"].dt.year
-        df["month"] = df["date"].dt.month
+        # cột thời gian trong vnstock là 'time'
+        df["time"] = pd.to_datetime(df["time"])
+        df = df.sort_values("time")
+        df["year"] = df["time"].dt.year
+        df["month"] = df["time"].dt.month
 
-        # Lợi nhuận theo từng (year, month): last_close / first_close - 1
         grp = df.groupby(["year", "month"])
         monthly_ret = (grp["close"].last() / grp["close"].first() - 1.0).reset_index()
         if monthly_ret.empty:
@@ -97,9 +103,11 @@ def get_monthly_returns_vnstock(ticker, years=10):
 
         avg_by_month = monthly_ret.groupby("month")["close"].mean().to_dict()
         return avg_by_month
+
     except Exception as e:
         log(f"⚠️ Seasonality {ticker} lỗi: {e}")
         return {}
+
 
 
 def rebuild_seasonality_cache(tickers):
