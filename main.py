@@ -404,7 +404,7 @@ def main():
         return
 
     # 2) Cập nhật FA cache
-    #if mode == "fa":
+    if mode == "fa":
         tks = get_tickers_under_10k()
         if not tks:
             log("⚠️ Không lấy được danh sách từ sheet.")
@@ -416,12 +416,13 @@ def main():
     # 3) mode == scan (default): update FA rồi quét TA
     if mode == "scan":
         # 1) Cập nhật FA cache TRƯỚC
-        log("🔄 Cập nhật FA cache trước khi scan TA…")
-        run_fa_update(tks)
+        #log("🔄 Cập nhật FA cache trước khi scan TA…")
+        #run_fa_update(tks)
     
         # 2) Load FA từ cache vừa update
-        df_fa_cache = load_fa_cache()
-        fa_list = analyze_fa(df_fa_cache) if not df_fa_cache.empty else []
+        #df_fa_cache = load_fa_cache()
+        #fa_list = analyze_fa(df_fa_cache) if not df_fa_cache.empty else []
+        fa_list = []
 
     if not fa_list:
         log("🟠 Không dùng được FA (cache rỗng hoặc không mã nào pass) → TA-only.")
@@ -441,26 +442,26 @@ def main():
         return
 
     # … nếu FA có dữ liệu thì chạy flow (FA -> TA)
-    final = []
-    for i, it in enumerate(fa_list, 1):
-        tk = it["ticker"]
-        log(f"[FA+TA] {i}/{len(fa_list)} — {tk}")
-        df = get_ohlc_days_tcbs(tk, days=180)
-        if df.empty:
-            continue
-        conds, score = technical_signals(df)
-        if conds.get("enough_data") and score >= 3:
-            try:
-                last_close = float(df["close"].iloc[-1])
-            except Exception:
-                last_close = it.get("price", 0)
-            final.append({
-                **it,
-                "price": last_close,
-                "ta_score": score
-            })
+    #final = []
+    #for i, it in enumerate(fa_list, 1):
+    #    tk = it["ticker"]
+    #    log(f"[FA+TA] {i}/{len(fa_list)} — {tk}")
+    #    df = get_ohlc_days_tcbs(tk, days=180)
+    #    if df.empty:
+    #        continue
+    #    conds, score = technical_signals(df)
+    #    if conds.get("enough_data") and score >= 3:
+      #      try:
+      #          last_close = float(df["close"].iloc[-1])
+       #     except Exception:
+       #         last_close = it.get("price", 0)
+       #     final.append({
+        #        **it,
+        #        "price": last_close,
+        #        "ta_score": score
+       #     })
 
-    send_telegram(format_msg_fa_ta(final))
+    #send_telegram(format_msg_fa_ta(final))
     log(f"ALL DONE. Final={len(final)}")
 
 if __name__ == "__main__":
