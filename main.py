@@ -424,21 +424,21 @@ def main():
         fa_list = analyze_fa(df_fa_cache) if not df_fa_cache.empty else []
 
     if not fa_list:
-    log("🟠 Không dùng được FA (cache rỗng hoặc không mã nào pass) → TA-only.")
-    # tks đã lấy ở đầu main rồi
-    final = []
-    for i, tk in enumerate(tks, 1):
-        log(f"[TA-only] {i}/{len(tks)} – {tk}")
-        df = get_ohlc_days_tcbs(tk, days=180)   # hoặc get_ohlc_days_fireant / vnd tuỳ bạn đang dùng
-        if df.empty:
-            continue
-        conds, score = technical_signals(df)
-        if conds.get("enough_data") and score >= 3:
-            final.append({"ticker": tk, "ta_score": score})
-        time.sleep(0.15)
-    send_telegram(format_msg_ta_only(final))
-    log(f"ALL DONE (TA-only). Final={len(final)}")
-    return
+        log("🟠 Không dùng được FA (cache rỗng hoặc không mã nào pass) → TA-only.")
+        # tks đã lấy ở đầu main rồi
+        final = []
+        for i, tk in enumerate(tks, 1):
+            log(f"[TA-only] {i}/{len(tks)} – {tk}")
+            df = get_ohlc_days_tcbs(tk, days=180)   # hoặc get_ohlc_days_fireant / vnd tuỳ bạn đang dùng
+            if df.empty:
+                continue
+            conds, score = technical_signals(df)
+            if conds.get("enough_data") and score >= 3:
+                final.append({"ticker": tk, "ta_score": score})
+            time.sleep(0.15)
+        send_telegram(format_msg_ta_only(final))
+        log(f"ALL DONE (TA-only). Final={len(final)}")
+        return
 
     # … nếu FA có dữ liệu thì chạy flow (FA -> TA)
     final = []
