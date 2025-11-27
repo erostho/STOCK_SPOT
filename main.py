@@ -390,6 +390,13 @@ def main():
     mode = (sys.argv[1] if len(sys.argv) > 1 else "scan").lower()
     log(f"🚀 Start BOT mode={mode}")
 
+    # LẤY DANH SÁCH MÃ DÙNG CHUNG
+    tks = get_tickers_under_10k()
+    if not tks:
+        log("⚠️ Không lấy được danh sách mã từ sheet.")
+        send_telegram("⚠️ BOT: không lấy được danh sách mã từ sheet, dừng scan.")
+        return
+
     # 1) Xem nhanh danh sách mã
     if mode == "list":
         tks = get_tickers_under_10k()
@@ -406,30 +413,32 @@ def main():
         log("FA update DONE.")
         return
 
-    # 3) mode == scan (default): dùng FA cache + TA realtime
-    df_fa_cache = load_fa_cache()
-    fa_list = analyze_fa(df_fa_cache) if not df_fa_cache.empty else []
+    # 3) mode == scan (default): update FA rồi quét TA
+    if mode == "scan":
+        # 1) Cập nhật FA cache TRƯỚC
+        log("🔄 Cập nhật FA cache trước khi scan TA…")
+        run_fa_update(tks)
+    
+        # 2) Load FA từ cache vừa update
+        df_fa_cache = load_fa_cache()
+        fa_list = analyze_fa(df_fa_cache) if not df_fa_cache.empty else []
 
     if not fa_list:
-        # 👉 TA-only: khi FA rỗng hoặc không pass
-        log("🟠 Không dùng được FA → TA-only.")
-        tks = get_tickers_under_10k()
-        if not tks:
-            send_telegram("⚠️ BOT: không lấy được danh sách mã từ sheet.")
-            return
-        final = []
-        for i, tk in enumerate(tks, 1):
-            log(f"[TA-only] {i}/{len(tks)} – {tk}")
-            df = get_ohlc_days_tcbs(tk, days=180)
-            if df.empty:
-                continue
-            conds, score = technical_signals(df)
-            if conds.get("enough_data") and score >= 3:
-                final.append({"ticker": tk, "ta_score": score})
-            time.sleep(0.15)
-        send_telegram(format_msg_ta_only(final))
-        log(f"ALL DONE (TA-only). Final={len(final)}")
-        return
+    log("🟠 Không dùng được FA (cache rỗng hoặc không mã nào pass) → TA-only.")
+    # tks đã lấy ở đầu main rồi
+    final = []
+    for i, tk in enumerate(tks, 1):
+        log(f"[TA-only] {i}/{len(tks)} – {tk}")
+        df = get_ohlc_days_tcbs(tk, days=180)   # hoặc get_ohlc_days_fireant / vnd tuỳ bạn đang dùng
+        if df.empty:
+            continue
+        conds, score = technical_signals(df)
+        if conds.get("enough_data") and score >= 3:
+            final.append({"ticker": tk, "ta_score": score})
+        time.sleep(0.15)
+    send_telegram(format_msg_ta_only(final))
+    log(f"ALL DONE (TA-only). Final={len(final)}")
+    return
 
     # … nếu FA có dữ liệu thì chạy flow (FA -> TA)
     final = []
