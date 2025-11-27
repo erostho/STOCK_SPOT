@@ -1,32 +1,23 @@
 # ===========================
-#  VN STOCK BOT: GOOGLE SHEET + VNDIRECT
-#  - Google Sheet: danh sách mã cổ phiếu < 10.000đ (đã lọc sẵn)
-#  - VNDIRECT: FA (financial_reports) + TA (stock_prices per ticker)
-#  - Không dùng FireAnt nữa
+#  VN STOCK BOT: FA = vnstock, TA = TCBS
+#  - B1: Lấy danh sách mã từ Google Sheet (cp < 10k bạn đã lọc sẵn)
+#  - B2: FA từ vnstock (VCI source) -> cache 7 ngày
+#  - B3: TA từ TCBS (OHLC daily) -> mỗi lần scan
 # ===========================
 
-import os, json, time, sys
+import os, sys, json, time
+from datetime import datetime, timedelta
+
 import requests
 import pandas as pd
 import ta
-import time
-from datetime import datetime, timedelta
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from vnstock import Vnstock  # pip install vnstock
 
-# ---------- ENV ----------
-FINFO_BASE = "https://finfo-api.vndirect.com.vn/v4"
-FR_URL     = f"{FINFO_BASE}/financial_reports"
-PRICE_URL  = f"{FINFO_BASE}/stock_prices"
-
-TELEGRAM_TOKEN   = (os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+# ---------- ENV & CACHE DIR ----------
+TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+SHEET_CSV_URL = os.getenv("SHEET_CSV_URL", "").strip()
 
-# URL CSV của Google Sheet (đã lọc sẵn cp <10k)
-# Ví dụ: https://docs.google.com/spreadsheets/d/<ID>/export?format=csv&gid=0
-SHEET_CSV_URL = (os.getenv("SHEET_CSV_URL") or "").strip()
-
-import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -35,6 +26,9 @@ def log(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 # ---------- HTTP SESSION ----------
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 def make_session():
     s = requests.Session()
     s.headers.update({
@@ -45,7 +39,7 @@ def make_session():
     retry = Retry(
         total=5, connect=5, read=5,
         backoff_factor=0.8,
-        status_forcelist=[429,500,502,503,504],
+        status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"]
     )
     s.mount("https://", HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=retry))
@@ -54,7 +48,7 @@ def make_session():
 
 SESSION = make_session()
 
-# ---------- CACHE ----------
+# ---------- SIMPLE CACHE ----------
 def cache_get(name, ttl_sec):
     p = os.path.join(CACHE_DIR, name)
     try:
@@ -69,194 +63,204 @@ def cache_set(name, obj):
     p = os.path.join(CACHE_DIR, name)
     try:
         with open(p, "w", encoding="utf-8") as f:
-            json.dump(obj, f)
+            json.dump(obj, f, ensure_ascii=False)
     except Exception:
         pass
 
 # ============================================================
-# B1) DANH SÁCH MÃ TỪ GOOGLE SHEET (ĐÃ LỌC SẴN <10.000đ)
+# B1) LẤY DANH SÁCH MÃ TỪ GOOGLE SHEET (bạn đã lọc <10k ở đó)
 # ============================================================
 
 def get_tickers_from_sheet():
-    """
-    Đọc Google Sheet CSV, lấy danh sách mã cổ phiếu.
-    Sheet của bạn đã là cp <10.000đ nên KHÔNG lọc lại theo giá nữa.
-    """
-    url = SHEET_CSV_URL
-    if not url:
-        log("❌ SHEET_CSV_URL chưa cấu hình.")
+    if not SHEET_CSV_URL:
+        log("⚠️ SHEET_CSV_URL chưa cấu hình.")
         return []
 
     try:
-        df = pd.read_csv(url, engine="python", on_bad_lines="skip")
-
-        # Tìm cột 'Mã' hoặc các tên tương đương
-        col = None
-        for c in df.columns:
-            if str(c).strip().lower() in ["mã", "ma", "ticker", "symbol", "code"]:
-                col = c
-                break
-        if col is None:
-            col = df.columns[0]  # fallback: cột đầu tiên
-
-        tks = (df[col]
-               .astype(str)
-               .str.upper()
-               .str.strip()
-               .dropna()
-               .unique()
-               .tolist())
-        tks = sorted(set(tks))
-        log(f"✅ Sheet lấy được {len(tks)} mã cp <30k (đã lọc sẵn).")
-        return tks
+        df = pd.read_csv(SHEET_CSV_URL)
     except Exception as e:
         log(f"❌ Lỗi đọc sheet: {e}")
         return []
 
-def get_tickers_under_10k(refresh: bool = False):
-    """
-    Hàm chuẩn để dùng trong main().
-    Hiện tại: chỉ lấy từ Google Sheet, cache 30 phút.
-    """
-    cache_name = "tickers_from_sheet.json"
-    if not refresh:
-        cached = cache_get(cache_name, ttl_sec=1800)  # 30 phút
-        if cached and cached.get("tickers"):
-            log(f"🟢 Dùng cache tickers từ sheet: {len(cached['tickers'])} mã")
-            return cached["tickers"]
+    # tìm cột mã: "Mã", "ma", "ticker", "symbol", "code"
+    col_ticker = None
+    for c in df.columns:
+        if str(c).strip().lower() in ["mã", "ma", "ticker", "symbol", "code"]:
+            col_ticker = c
+            break
+    if col_ticker is None:
+        # fallback cột A
+        col_ticker = df.columns[0]
 
-    tks = get_tickers_from_sheet()
-    cache_set(cache_name, {"tickers": tks})
+    tks = (
+        df[col_ticker]
+        .astype(str).str.upper().str.strip()
+        .dropna().unique().tolist()
+    )
+    tks = sorted(set([tk for tk in tks if tk and tk != "NAN"]))
+    log(f"✅ Sheet lấy được {len(tks)} mã cp (đã lọc sẵn).")
     return tks
 
 # ============================================================
-# B2) FA TỪ VNDIRECT (CÓ CACHE 7 NGÀY)
+# B2) FA TỪ VNSTOCK (SOURCE = VCI) + CACHE 7 NGÀY
 # ============================================================
 
-def get_fr_one_ticker_vnd(tk):
-    try:
-        params = {"q": f"ticker:{tk}~reportType:QUARTER", "size": 8, "sort": "-yearQuarter"}
-        r = SESSION.get(FR_URL, params=params, timeout=(8, 18))
-        r.raise_for_status()
-        return r.json().get("data", [])
-    except Exception as e:
-        log(f"⚠️ {tk} FR lỗi: {e}")
-        return []
+def _find_col(df: pd.DataFrame, keywords):
+    """
+    Tìm tên cột chứa 1 trong các keyword (bỏ khoảng trắng, lowercase).
+    Dùng để dò 'EPS', 'ROE', 'P/E', 'Debt/Equity'… trong bảng ratio vnstock.
+    """
+    kws = [k.lower().replace(" ", "") for k in keywords]
+    for col in df.columns:
+        key = str(col).lower().replace(" ", "").replace("_", "")
+        for k in kws:
+            if k in key:
+                return col
+    return None
 
-def run_fa_update(tickers):
-    """Tải FA cho list tickers và lưu cache 7 ngày: fa_cache.json"""
+def get_fa_one_ticker_vnstock(tk: str):
+    """
+    Lấy FA cho 1 mã từ vnstock (VCI source) – dùng bảng ratio (year).
+    Trả về dict với: ticker, eps, roe, pe, de (debt/equity)
+    hoặc None nếu lỗi / thiếu dữ liệu.
+    """
+    symbol = tk.upper().strip()
+    try:
+        stock = Vnstock().stock(symbol=symbol, source="VCI")
+        ratio_df = stock.finance.ratio(period="year", lang="vi", dropna=True)
+        if ratio_df is None or ratio_df.empty:
+            log(f"🟡 FA vnstock rỗng cho {symbol}")
+            return None
+
+        # lấy dòng mới nhất (thường là năm gần nhất)
+        row = ratio_df.iloc[-1]
+
+        col_eps = _find_col(ratio_df, ["eps"])
+        col_roe = _find_col(ratio_df, ["roe"])
+        col_pe  = _find_col(ratio_df, ["p/e", "pe"])
+        col_de  = _find_col(ratio_df, ["nợ/vốn", "debttoequity", "debt/equity", "d/e"])
+
+        def _get(row, col):
+            if col is None:
+                return None
+            try:
+                v = row[col]
+                return float(v) if pd.notna(v) else None
+            except Exception:
+                return None
+
+        eps = _get(row, col_eps)
+        roe = _get(row, col_roe)
+        pe  = _get(row, col_pe)
+        de  = _get(row, col_de)
+
+        if eps is None or roe is None or pe is None:
+            log(f"🟡 Thiếu cột FA (EPS/ROE/PE) cho {symbol}")
+            return None
+
+        return {
+            "ticker": symbol,
+            "eps": eps,
+            "roe": roe,
+            "pe": pe,
+            "de": de,
+        }
+
+    except Exception as e:
+        log(f"⚠️ FA vnstock lỗi {symbol}: {e}")
+        return None
+
+def run_fa_update_vnstock(tickers):
+    """
+    Tải FA cho list tickers từ vnstock và lưu vào cache 7 ngày: fa_cache.json
+    """
     if not tickers:
         log("❌ Không có tickers để cập nhật FA.")
-        return []
-    log(f"🧾 Cập nhật FA cho {len(tickers)} mã …")
-    out = []
+        return pd.DataFrame()
+
+    log(f"🧾 Cập nhật FA (vnstock/VCI) cho {len(tickers)} mã …")
+    rows = []
     for i, tk in enumerate(tickers, 1):
-        out.extend(get_fr_one_ticker_vnd(tk))
-        if i % 25 == 0:
-            log(f"…đã lấy {i}/{len(tickers)} mã FA")
-            time.sleep(0.3)
-    df = pd.DataFrame(out)
-    cache_set("fa_cache.json", {"rows": out, "ts": int(time.time())})
-    log(f"✅ Lưu cache FA: {len(df)} dòng (7 ngày)")
+        fa = get_fa_one_ticker_vnstock(tk)
+        if fa:
+            rows.append(fa)
+        if i % 20 == 0:
+            log(f"…đã lấy FA {i}/{len(tickers)} mã")
+        time.sleep(0.2)
+
+    df = pd.DataFrame(rows)
+    cache_set("fa_cache.json", {"rows": rows, "ts": int(time.time())})
+    log(f"✅ Lưu cache FA (vnstock): {len(df)} mã (7 ngày).")
     return df
 
 def load_fa_cache():
-    cached = cache_get("fa_cache.json", ttl_sec=7*24*3600)
+    cached = cache_get("fa_cache.json", ttl_sec=7 * 24 * 3600)
     if cached and cached.get("rows"):
         return pd.DataFrame(cached["rows"])
     return pd.DataFrame()
 
-def analyze_fa(df_quarter: pd.DataFrame):
+def analyze_fa(df: pd.DataFrame):
     """
-    FA filter:
-      - 0 < price < 10000
+    FA filter (đơn giản hơn bản VNDIRECT cũ):
       - EPS > 500
-      - ROE > 10
-      - 0 < PE < 10
-      - Debt/Equity < 1
-      - CFO TTM dương
-      - LNST YoY tăng
-      - Tồn kho YoY không tăng > 30%
+      - ROE > 10 (%)
+      - 0 < PE < 15
+      - Debt/Equity < 1 (nếu có)
     """
-    if df_quarter.empty:
+    if df is None or df.empty:
         return []
+
     fa_pass = []
-    for ticker, sub in df_quarter.groupby("ticker"):
-        sub = sub.sort_values(by="yearQuarter", ascending=False).head(8)
-        latest = sub.iloc[0].to_dict()
+    for _, r in df.iterrows():
+        try:
+            tk  = str(r["ticker"]).upper()
+            eps = float(r.get("eps", 0) or 0)
+            roe = float(r.get("roe", 0) or 0)
+            pe  = float(r.get("pe",  0) or 0)
+            de  = r.get("de", None)
+            de  = float(de) if de is not None else None
+        except Exception:
+            continue
 
-        def f(row, key, default=0.0):
-            try:
-                v = row.get(key, default)
-                return float(v) if pd.notna(v) else default
-            except Exception:
-                return default
-
-        price = f(latest, "price")
-        eps   = f(latest, "eps")
-        pe    = f(latest, "pe")
-        roe   = f(latest, "roe")
-        inv   = f(latest, "inventory")
-        liab  = f(latest, "liabilities")
-        eq    = f(latest, "equity")
-
-        lnst_q = pd.to_numeric(sub.get("netProfit"), errors="coerce").fillna(0.0).values.tolist()
-        cfo_q  = pd.to_numeric(sub.get("netCashFlowFromOperatingActivities"), errors="coerce").fillna(0.0).values.tolist()
-
-        inv_yoy = None
-        if len(sub) >= 5:
-            inv_yoy = f(sub.iloc[4].to_dict(), "inventory", None)
-
-        # Điều kiện
-        if not (0 < price < 10000): continue
-        if not (eps > 500): continue
-        if not (roe > 10):  continue
-        if not (0 < pe < 10): continue
-        if eq <= 0 or (liab/eq) >= 1.0: continue
-        cfo_ttm = sum(cfo_q[:4]) if len(cfo_q) >= 4 else sum(cfo_q)
-        if cfo_ttm <= 0: continue
-        lnst_yoy_ok = False
-        if len(lnst_q) >= 5:
-            lnst_yoy_ok = lnst_q[0] > lnst_q[4]
-        elif len(lnst_q) >= 8:
-            lnst_yoy_ok = sum(lnst_q[:4]) > sum(lnst_q[4:8])
-        if not lnst_yoy_ok: continue
-        if inv_yoy and inv_yoy > 0:
-            if (inv - inv_yoy) / inv_yoy > 0.30:
-                continue
+        if eps <= 500:
+            continue
+        if roe <= 10:
+            continue
+        if not (0 < pe < 15):
+            continue
+        if de is not None and de >= 1:
+            continue
 
         fa_pass.append({
-            "ticker": ticker,
-            "price": price,
+            "ticker": tk,
             "eps": eps,
             "roe": roe,
-            "pe": pe
+            "pe": pe,
+            "de": de,
         })
-    log(f"✅ FA PASS: {len(fa_pass)} mã")
+
+    log(f"✅ FA PASS (vnstock): {len(fa_pass)} mã")
     return fa_pass
 
 # ============================================================
-# B3) TA: NẾN NGÀY TỪ VNDIRECT
+# B3) TA TỪ TCBS (OHLC DAILY)
 # ============================================================
 
 def get_ohlc_days_tcbs(tk: str, days: int = 180):
     """
     Lấy nến ngày từ TCBS:
-    https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term
+      https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term
     """
-    tk = tk.upper().strip()
-
-    # Tính khoảng thời gian cần lấy
+    ticker = tk.upper().strip()
     end_date = datetime.now().date()
-    start_date = end_date - timedelta(days=int(days * 1.2))  # buffer rộng hơn chút
+    start_date = end_date - timedelta(days=int(days * 1.2))
 
-    # Đổi về timestamp (second)
     start_ts = int(time.mktime(datetime.combine(start_date, datetime.min.time()).timetuple()))
     end_ts   = int(time.mktime(datetime.combine(end_date,   datetime.min.time()).timetuple()))
 
     url = "https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term"
     params = {
-        "ticker": tk,
+        "ticker": ticker,
         "type": "stock",
         "resolution": "D",
         "from": start_ts,
@@ -266,38 +270,32 @@ def get_ohlc_days_tcbs(tk: str, days: int = 180):
     try:
         r = SESSION.get(url, params=params, timeout=(8, 20))
         if r.status_code == 404:
-            log(f"⛔ TCBS không có dữ liệu cho {tk}, bỏ qua.")
+            log(f"⛔ TCBS không có dữ liệu cho {ticker}, bỏ qua.")
             return pd.DataFrame()
         r.raise_for_status()
         data = r.json().get("data", [])
         if not data:
-            log(f"🟡 TCBS trả rỗng cho {tk}.")
+            log(f"🟡 TCBS trả rỗng cho {ticker}.")
             return pd.DataFrame()
 
         df = pd.DataFrame(data)
-
-        # TCBS thường trả: open, high, low, close, volume, tradingDate
         if "tradingDate" not in df.columns:
-            log(f"🟡 TCBS thiếu cột tradingDate cho {tk}.")
+            log(f"🟡 TCBS thiếu cột tradingDate cho {ticker}.")
             return pd.DataFrame()
 
         df["date"] = pd.to_datetime(df["tradingDate"].str.split("T", expand=True)[0]).dt.date
 
-        # Đảm bảo đủ cột OHLCV
         for col in ["open", "high", "low", "close", "volume"]:
             if col not in df.columns:
                 df[col] = pd.NA
 
         df = df[["date", "open", "high", "low", "close", "volume"]].dropna(subset=["close"])
-
-        # Cắt đúng số ngày cần dùng
         if len(df) > days:
             df = df.iloc[-days:].reset_index(drop=True)
-
         return df
 
     except Exception as e:
-        log(f"⚠️ OHLC TCBS lỗi {tk}: {e}")
+        log(f"⚠️ OHLC TCBS lỗi {ticker}: {e}")
         return pd.DataFrame()
 
 def technical_signals(df: pd.DataFrame):
@@ -324,17 +322,12 @@ def technical_signals(df: pd.DataFrame):
     df["ma20"] = df["close"].rolling(20).mean()
     df["vol_ma20"] = df["volume"].rolling(20).mean()
 
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-
+    latest = df.iloc[-1]; prev = df.iloc[-2]
     conds["ADX>20_DI+>DI-"]   = bool((latest["adx"] > 20) and (latest["di_pos"] > latest["di_neg"]))
     conds["RSI>50_cross_up"]  = bool((latest["rsi"] > 50) and (prev["rsi"] <= 50))
     conds["Break_20_high"]    = bool(latest["close"] > float(df["close"].iloc[-20:-1].max()))
     conds["Vol_up_3_days"]    = bool(df["volume"].iloc[-1] > df["volume"].iloc[-2] > df["volume"].iloc[-3])
-    conds["Close>MA20_VolSp"] = bool(
-        (latest["close"] > latest["ma20"]) and
-        (latest["volume"] > 1.5 * latest["vol_ma20"])
-    )
+    conds["Close>MA20_VolSp"] = bool((latest["close"] > latest["ma20"]) and (latest["volume"] > 1.5 * latest["vol_ma20"]))
 
     score = sum(1 for v in conds.values() if v)
     conds["enough_data"] = True
@@ -342,14 +335,13 @@ def technical_signals(df: pd.DataFrame):
     return conds, score
 
 # ============================================================
-# GỬI TELEGRAM
+# TELEGRAM FORMAT & SEND
 # ============================================================
-def send_telegram(text: str):
-    token = TELEGRAM_TOKEN
-    chat  = TELEGRAM_CHAT_ID
+
+def send_telegram(text):
+    token = TELEGRAM_TOKEN; chat = TELEGRAM_CHAT_ID
     if not token or not chat:
-        log("❌ Thiếu TELEGRAM_TOKEN / TELEGRAM_CHAT_ID")
-        return
+        log("❌ Thiếu TELEGRAM_TOKEN / TELEGRAM_CHAT_ID"); return
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         r = requests.post(url, data={"chat_id": chat, "text": text}, timeout=15)
@@ -363,76 +355,64 @@ def send_telegram(text: str):
 def format_msg_fa_ta(stocks):
     today = datetime.now().strftime("%d/%m/%Y")
     if not stocks:
-        return f"📉 [{today}] Không có mã nào đạt FA + TA."
-    msg = f"📈 [{today}] Mã CP <30k đạt FA + TA (≥3/5):\n\n"
+        return f"📉 [{today}] Không có mã nào đạt FA (vnstock) + TA (≥3/5)."
+    msg = f"📈 [{today}] Mã <10k đạt FA (vnstock) + TA (≥3/5):\n\n"
     for s in stocks:
+        de_txt = f"{s['de']:.2f}" if s.get("de") is not None else "N/A"
         msg += (
-            f"• {s['ticker']} | Giá: {int(s['price'])}đ | EPS:{int(s['eps'])} "
-            f"| ROE:{s['roe']:.1f}% | P/E:{s['pe']:.1f} | TA✓:{s['ta_score']}/5\n"
+            f"• {s['ticker']} | EPS:{int(s['eps'])} | ROE:{s['roe']:.1f}% "
+            f"| P/E:{s['pe']:.1f} | D/E:{de_txt} | TA✓:{s['ta_score']}/5\n"
         )
     return msg
 
 def format_msg_ta_only(stocks):
     today = datetime.now().strftime("%d/%m/%Y")
     if not stocks:
-        return f"📉 [{today}] Không có mã nào đạt TA (≥3/5)."
-    msg = f"📈 [{today}] Mã <30k đạt TA (≥3/5) – không lọc FA:\n\n"
+        return f"📉 [{today}] Mã <10k đạt TA (≥3/5) – không lọc FA."
+    msg = f"📊 [{today}] Mã <10k đạt TA (≥3/5) – không lọc FA:\n\n"
     for s in stocks:
         msg += f"• {s['ticker']} | TA✓:{s['ta_score']}/5\n"
     return msg
 
 # ============================================================
-# MAIN MODES
-#   - python main.py list   -> chỉ lấy danh sách mã từ Sheet
-#   - python main.py fa     -> cập nhật & cache FA từ VNDIRECT
-#   - python main.py scan   -> load FA cache -> quét TA + gửi Telegram
+# MAIN
+#   python main.py list  -> chỉ lấy danh sách mã từ sheet
+#   python main.py fa    -> cập nhật & cache FA từ vnstock
+#   python main.py scan  -> FA cache (nếu có) + TA realtime
 # ============================================================
 
 def main():
     mode = (sys.argv[1] if len(sys.argv) > 1 else "scan").lower()
     log(f"🚀 Start BOT mode={mode}")
 
-    # LẤY DANH SÁCH MÃ DÙNG CHUNG
-    tks = get_tickers_under_10k()
-    if not tks:
-        log("⚠️ Không lấy được danh sách mã từ sheet.")
-        send_telegram("⚠️ BOT: không lấy được danh sách mã từ sheet, dừng scan.")
+    tks = get_tickers_from_sheet()
+    if not tks and mode != "list":
+        send_telegram("⚠️ BOT: Không lấy được danh sách mã từ Sheet.")
         return
 
-    # 1) Xem nhanh danh sách mã
+    # --- mode: chỉ list mã ---
     if mode == "list":
-        tks = get_tickers_under_10k()
-        log(f"Done list: {len(tks)} mã")
         return
 
-    # 2) Cập nhật FA cache
+    # --- mode: cập nhật FA cache từ vnstock ---
     if mode == "fa":
-        tks = get_tickers_under_10k()
-        if not tks:
-            log("⚠️ Không lấy được danh sách từ sheet.")
-            return
-        _ = run_fa_update(tks)
+        _ = run_fa_update_vnstock(tks)
         log("FA update DONE.")
         return
 
-    # 3) mode == scan (default): update FA rồi quét TA
-    if mode == "scan":
-        # 1) Cập nhật FA cache TRƯỚC
-        #log("🔄 Cập nhật FA cache trước khi scan TA…")
-        #run_fa_update(tks)
-    
-        # 2) Load FA từ cache vừa update
-        #df_fa_cache = load_fa_cache()
-        #fa_list = analyze_fa(df_fa_cache) if not df_fa_cache.empty else []
-        fa_list = []
+    # --- mode: scan (FA + TA nếu có FA, else TA-only) ---
+    # (OPTIONAL) Cập nhật FA trước khi scan – nếu muốn tắt thì comment 2 dòng dưới
+    # run_fa_update_vnstock(tks)
+
+    df_fa_cache = load_fa_cache()
+    fa_list = analyze_fa(df_fa_cache) if not df_fa_cache.empty else []
 
     if not fa_list:
         log("🟠 Không dùng được FA (cache rỗng hoặc không mã nào pass) → TA-only.")
-        # tks đã lấy ở đầu main rồi
         final = []
         for i, tk in enumerate(tks, 1):
             log(f"[TA-only] {i}/{len(tks)} – {tk}")
-            df = get_ohlc_days_tcbs(tk, days=180)   # hoặc get_ohlc_days_fireant / vnd tuỳ bạn đang dùng
+            df = get_ohlc_days_tcbs(tk, days=180)
             if df.empty:
                 continue
             conds, score = technical_signals(df)
@@ -443,28 +423,21 @@ def main():
         log(f"ALL DONE (TA-only). Final={len(final)}")
         return
 
-    # … nếu FA có dữ liệu thì chạy flow (FA -> TA)
-    #final = []
-    #for i, it in enumerate(fa_list, 1):
-    #    tk = it["ticker"]
-    #    log(f"[FA+TA] {i}/{len(fa_list)} — {tk}")
-    #    df = get_ohlc_days_tcbs(tk, days=180)
-    #    if df.empty:
-    #        continue
-    #    conds, score = technical_signals(df)
-    #    if conds.get("enough_data") and score >= 3:
-      #      try:
-      #          last_close = float(df["close"].iloc[-1])
-       #     except Exception:
-       #         last_close = it.get("price", 0)
-       #     final.append({
-        #        **it,
-        #        "price": last_close,
-        #        "ta_score": score
-       #     })
+    # Nếu FA có dữ liệu thì chạy FA -> TA
+    final = []
+    for i, it in enumerate(fa_list, 1):
+        tk = it["ticker"]
+        log(f"[FA+TA] {i}/{len(fa_list)} — {tk}")
+        df = get_ohlc_days_tcbs(tk, days=180)
+        if df.empty:
+            continue
+        conds, score = technical_signals(df)
+        if conds.get("enough_data") and score >= 3:
+            final.append({**it, "ta_score": score})
+        time.sleep(0.15)
 
-    #send_telegram(format_msg_fa_ta(final))
-    #log(f"ALL DONE. Final={len(final)}")
+    send_telegram(format_msg_fa_ta(final))
+    log(f"ALL DONE (FA+TA). Final={len(final)}")
 
 if __name__ == "__main__":
     main()
