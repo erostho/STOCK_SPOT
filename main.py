@@ -22,6 +22,8 @@ SHEET_CSV_URL = os.getenv("SHEET_CSV_URL", "").strip()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
+SEASONALITY_FILE = "seasonality_cache.json"
+
 
 def log(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -67,6 +69,101 @@ def cache_set(name, obj):
             json.dump(obj, f, ensure_ascii=False)
     except Exception:
         pass
+def get_monthly_returns_vnstock(ticker, years=10):
+    """
+    Lấy dữ liệu 1D ~10 năm, tính lợi nhuận trung bình theo tháng (1..12)
+    return: dict {month:int -> avg_return:float}
+    """
+    try:
+        v = Vnstock(ticker, source='TCBS')
+        end = datetime.now().date()
+        start = end - timedelta(days=365*years)
+        df = v.stock_historical_data(start=start.strftime("%Y-%m-%d"),
+                                     end=end.strftime("%Y-%m-%d"),
+                                     interval='1D')
+        if df is None or df.empty:
+            return {}
+
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date")
+        df["year"] = df["date"].dt.year
+        df["month"] = df["date"].dt.month
+
+        # Lợi nhuận theo từng (year, month): last_close / first_close - 1
+        grp = df.groupby(["year", "month"])
+        monthly_ret = (grp["close"].last() / grp["close"].first() - 1.0).reset_index()
+        if monthly_ret.empty:
+            return {}
+
+        avg_by_month = monthly_ret.groupby("month")["close"].mean().to_dict()
+        return avg_by_month
+    except Exception as e:
+        log(f"⚠️ Seasonality {ticker} lỗi: {e}")
+        return {}
+
+
+def rebuild_seasonality_cache(tickers):
+    """
+    Phân tích seasonality cho list tickers, lưu cache:
+    {
+      "built_key": "YYYY-MM",
+      "good_months": {
+         "CII": [2,3,4],
+         "HPG": [2,3],
+         ...
+      }
+    }
+    Tháng "tốt" = các tháng có return dương và thuộc top 4 tháng cao nhất của mã.
+    """
+    if not tickers:
+        return {}
+
+    log(f"📊 Rebuild seasonality cache cho {len(tickers)} mã …")
+    good_months = {}
+    for i, tk in enumerate(tickers, 1):
+        tk = str(tk).upper().strip()
+        log(f"   ↳ Seasonality {i}/{len(tickers)} – {tk}")
+        avg_month = get_monthly_returns_vnstock(tk, years=10)
+        if not avg_month:
+            continue
+
+        # Lọc tháng dương & top 4
+        items = [(m, r) for m, r in avg_month.items() if r > 0]
+        if not items:
+            continue
+        # sort theo return desc
+        items.sort(key=lambda x: x[1], reverse=True)
+        top = items[:4]   # lấy tối đa 4 tháng "đỉnh" nhất
+        good_months[tk] = [m for m, _ in top]
+
+    built_key = datetime.now().strftime("%Y-%m")
+    data = {"built_key": built_key, "good_months": good_months}
+    cache_set(SEASONALITY_FILE, data)
+    log(f"✅ Seasonality cache xong: {len(good_months)} mã.")
+    return good_months
+
+
+def load_seasonality_cache():
+    data = cache_get(SEASONALITY_FILE, ttl_sec=365*24*3600)  # TTL 1 năm
+    if not data:
+        return None, {}
+    return data.get("built_key"), data.get("good_months", {})
+
+
+def ensure_seasonality(tickers):
+    """
+    Đảm bảo tháng này đã có seasonality cache.
+    Nếu chưa có hoặc khác tháng hiện tại -> rebuild.
+    Trả về: dict {ticker -> [good_months]}
+    """
+    current_key = datetime.now().strftime("%Y-%m")
+    built_key, good_months = load_seasonality_cache()
+    if built_key == current_key and good_months:
+        log(f"🟢 Seasonality cache sẵn có cho {len(good_months)} mã (built={built_key}).")
+        return good_months
+
+    log("🟡 Seasonality cache chưa có / khác tháng -> rebuild…")
+    return rebuild_seasonality_cache(tickers)
 
 # ============================================================
 # B1) LẤY DANH SÁCH MÃ TỪ GOOGLE SHEET (bạn đã lọc <10k ở đó)
@@ -392,13 +489,15 @@ def format_msg_fa_ta(stocks):
 
     lines = []
     for s in stocks:
-        tk   = s["ticker"]
-        buy  = s.get("buy_zone")
-        tp   = s.get("tp_zone")
+        tk    = s["ticker"]
+        buy   = s.get("buy_zone")
+        tp    = s.get("tp_zone")
         score = s.get("ta_score", "?")
-
+        star  = "⭐️ " if s.get("season") else ""
+    
         if buy and tp:
-            lines.append(f"{tk}; {buy[0]}-{buy[1]}; {tp[0]}-{tp[1]} | TA:{score}/5")
+            lines.append(f"{star}{tk}; {buy[0]}-{buy[1]}; {tp[0]}-{tp[1]}; TA:{score}/5")
+    
 
     msg = f"💹 [{today}] Mã <30k đạt FA + TA (≥3/5):\n" + "\n".join(lines)
     return msg
@@ -416,13 +515,15 @@ def format_msg_ta_only(stocks):
 
     lines = []
     for s in stocks:
-        tk   = s["ticker"]
-        buy  = s.get("buy_zone")
-        tp   = s.get("tp_zone")
-        score = s.get("ta_score", "?")   # lấy điểm TA
-
+        tk    = s["ticker"]
+        buy   = s.get("buy_zone")
+        tp    = s.get("tp_zone")
+        score = s.get("ta_score", "?")
+        star  = "⭐️ " if s.get("season") else ""
+    
         if buy and tp:
-            lines.append(f"{tk}; {buy[0]}-{buy[1]}; {tp[0]}-{tp[1]} | TA:{score}/5")
+            lines.append(f"{star}{tk}; {buy[0]}-{buy[1]}; {tp[0]}-{tp[1]}; TA:{score}/5")
+
 
 
     msg = f"📈 [{today}] Mã <30k đạt TA (≥3/5):\n" + "\n".join(lines)
@@ -444,6 +545,10 @@ def main():
     if not tks:
         log("⚠️ Không lấy được danh sách mã từ Sheet.")
         return
+    # Seasonality: build cache 1 lần / tháng
+    season_map = ensure_seasonality(tks)  # dict {ticker: [good_months]}
+    current_month = datetime.now().month
+
     # ==== FA AUTO: chỉ update FA lúc 19h Thứ 6 VN ====
     now_utc = datetime.utcnow()
     now_vn  = now_utc + timedelta(hours=7)
@@ -474,12 +579,19 @@ def main():
             if conds.get("enough_data") and score >= 3:
                 buy_zone, tp_zone = calc_buy_tp(df)
                 if buy_zone and tp_zone:
+                    is_season = False
+                    if season_map and tk in season_map:
+                        if current_month in season_map[tk]:
+                            is_season = True
+            
                     final.append({
                         "ticker": tk,
                         "ta_score": score,
                         "buy_zone": buy_zone,
-                        "tp_zone": tp_zone
+                        "tp_zone": tp_zone,
+                        "season": is_season
                     })
+
 
             time.sleep(0.15)
         send_telegram(format_msg_ta_only(final))
@@ -498,12 +610,19 @@ def main():
         if conds.get("enough_data") and score >= 3:
             buy_zone, tp_zone = calc_buy_tp(df)
             if buy_zone and tp_zone:
+                is_season = False
+                if season_map and tk in season_map:
+                    if current_month in season_map[tk]:
+                        is_season = True
+        
                 final.append({
                     **it,
                     "ta_score": score,
                     "buy_zone": buy_zone,
-                    "tp_zone": tp_zone
+                    "tp_zone": tp_zone,
+                    "season": is_season
                 })
+
 
         time.sleep(0.15)
 
