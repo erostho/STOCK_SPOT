@@ -203,10 +203,10 @@ def load_fa_cache():
 def analyze_fa(df: pd.DataFrame):
     """
     FA filter (đơn giản hơn bản VNDIRECT cũ):
-      - EPS > 500
-      - ROE > 10 (%)
+      - EPS > 300
+      - ROE > 8 (%)
       - 0 < PE < 15
-      - Debt/Equity < 1 (nếu có)
+      - Debt/Equity < 1.5 (nếu có)
     """
     if df is None or df.empty:
         return []
@@ -223,13 +223,13 @@ def analyze_fa(df: pd.DataFrame):
         except Exception:
             continue
 
-        if eps <= 500:
+        if eps <= 300:
             continue
-        if roe <= 10:
+        if roe <= 8:
             continue
         if not (0 < pe < 15):
             continue
-        if de is not None and de >= 1:
+        if de is not None and de >= 1.5:
             continue
 
         fa_pass.append({
