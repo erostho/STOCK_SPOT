@@ -392,12 +392,13 @@ def format_msg_fa_ta(stocks):
 
     lines = []
     for s in stocks:
-        tk  = s["ticker"]
-        buy = s.get("buy_zone")
-        tp  = s.get("tp_zone")
+        tk   = s["ticker"]
+        buy  = s.get("buy_zone")
+        tp   = s.get("tp_zone")
+        score = s.get("ta_score", "?")
 
         if buy and tp:
-            lines.append(f"{tk}; {buy[0]}-{buy[1]}; {tp[0]}-{tp[1]}")
+            lines.append(f"{tk}; {buy[0]}-{buy[1]}; {tp[0]}-{tp[1]} | TA:{score}/5")
 
     msg = f"💹 [{today}] Mã <30k đạt FA + TA (≥3/5):\n" + "\n".join(lines)
     return msg
@@ -415,12 +416,14 @@ def format_msg_ta_only(stocks):
 
     lines = []
     for s in stocks:
-        tk  = s["ticker"]
-        buy = s.get("buy_zone")
-        tp  = s.get("tp_zone")
+        tk   = s["ticker"]
+        buy  = s.get("buy_zone")
+        tp   = s.get("tp_zone")
+        score = s.get("ta_score", "?")   # lấy điểm TA
 
         if buy and tp:
-            lines.append(f"{tk}; {buy[0]}-{buy[1]}; {tp[0]}-{tp[1]}")
+            lines.append(f"{tk}; {buy[0]}-{buy[1]}; {tp[0]}-{tp[1]} | TA:{score}/5")
+
 
     msg = f"📈 [{today}] Mã <30k đạt TA (≥3/5):\n" + "\n".join(lines)
     return msg
