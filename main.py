@@ -465,6 +465,63 @@ def calc_buy_tp(df):
     tp_high = round(swing_high * 2.0)    # Fibo 200%
 
     return (buy_low, buy_high), (tp_low, tp_high)
+# ========================
+#  EXTRA: NEAR BUY + LIQ
+# ========================
+LIQ_VALUE_MIN = 3e9   # giá trị giao dịch TB 20 phiên tối thiểu (3 tỷ)
+
+
+def calc_near_buy_and_liquidity(df):
+    """
+    - near_buy_bonus:
+        +2 điểm nếu giá hiện tại cách MA20 < 3%
+        +1 điểm nếu cách MA20 < 6%
+        +0 nếu xa hơn
+    - liquidity:
+        loại nếu GTGD TB20 < LIQ_VALUE_MIN
+        +1 điểm nếu GTGD TB20 >= 2 * LIQ_VALUE_MIN
+        +0 nếu chỉ vừa đủ
+    return:
+        (ok:bool, near_buy_bonus:int, liq_bonus:int)
+    """
+    if df is None or len(df) < 25:
+        return False, 0, 0
+
+    close = float(df["close"].iloc[-1])
+    # MA20 đã được tính sẵn trong technical_signals hoặc calc_buy_tp
+    if "ma20" not in df.columns:
+        df["ma20"] = df["close"].rolling(20).mean()
+    ma20 = float(df["ma20"].iloc[-1])
+
+    if ma20 <= 0 or pd.isna(ma20) or close <= 0:
+        return False, 0, 0
+
+    # khoảng cách tới MA20
+    dist = abs(close - ma20) / ma20
+    if dist < 0.03:
+        near_bonus = 2
+    elif dist < 0.06:
+        near_bonus = 1
+    else:
+        near_bonus = 0
+
+    # thanh khoản: giá trị giao dịch TB20
+    if "volume" not in df.columns or df["volume"].isna().all():
+        return False, 0, 0
+
+    value = df["close"] * df["volume"]
+    value20 = float(value.rolling(20).mean().iloc[-1])
+
+    if pd.isna(value20) or value20 < LIQ_VALUE_MIN:
+        # thanh khoản quá thấp -> loại
+        return False, 0, 0
+
+    if value20 >= 2 * LIQ_VALUE_MIN:
+        liq_bonus = 1
+    else:
+        liq_bonus = 0
+
+    return True, near_bonus, liq_bonus
 
 # ============================================================
 # TELEGRAM FORMAT & SEND
@@ -577,36 +634,55 @@ def main():
 
     if not fa_list:
         log("🟠 Không dùng được FA (cache rỗng hoặc không mã nào pass) → TA-only.")
+        # === TA-ONLY ===
         final = []
         for i, tk in enumerate(tks, 1):
             log(f"[TA-only] {i}/{len(tks)} – {tk}")
             df = get_ohlc_days_tcbs(tk, days=180)
             if df.empty:
                 continue
+        
             conds, score = technical_signals(df)
-            if conds.get("enough_data") and score >= 3:
-                buy_zone, tp_zone = calc_buy_tp(df)
-                if buy_zone and tp_zone:
-                    is_season = False
-                    if season_map and tk in season_map:
-                        if current_month in season_map[tk]:
-                            is_season = True
-            
-                    final.append({
-                        "ticker": tk,
-                        "ta_score": score,
-                        "buy_zone": buy_zone,
-                        "tp_zone": tp_zone,
-                        "season": is_season
-                    })
-
+            if not (conds.get("enough_data") and score >= 3):
+                continue
+        
+            # Tính BUY/TP
+            buy_zone, tp_zone = calc_buy_tp(df)
+            if not (buy_zone and tp_zone):
+                continue
+        
+            # Tính near_buy_bonus + liquidity filter
+            ok_liq, near_bonus, liq_bonus = calc_near_buy_and_liquidity(df)
+            if not ok_liq:
+                continue
+        
+            is_season = False
+            if season_map and tk in season_map:
+                if current_month in season_map[tk]:
+                    is_season = True
+        
+            base_total = score + near_bonus + liq_bonus + (1 if is_season else 0)
+        
+            final.append({
+                "ticker": tk,
+                "ta_score": score,
+                "buy_zone": buy_zone,
+                "tp_zone": tp_zone,
+                "near_buy_bonus": near_bonus,
+                "liq_bonus": liq_bonus,
+                "season": is_season,
+                "total_score": base_total,
+            })
 
             time.sleep(0.15)
+        # sort giảm dần theo total_score
+        final.sort(key=lambda x: x.get("total_score", 0), reverse=True)
         send_telegram(format_msg_ta_only(final))
         log(f"ALL DONE (TA-only). Final={len(final)}")
         return
 
     # Nếu FA có dữ liệu thì chạy FA -> TA
+    # === FA + TA ===
     final = []
     for i, it in enumerate(fa_list, 1):
         tk = it["ticker"]
@@ -614,26 +690,40 @@ def main():
         df = get_ohlc_days_tcbs(tk, days=180)
         if df.empty:
             continue
+    
         conds, score = technical_signals(df)
-        if conds.get("enough_data") and score >= 3:
-            buy_zone, tp_zone = calc_buy_tp(df)
-            if buy_zone and tp_zone:
-                is_season = False
-                if season_map and tk in season_map:
-                    if current_month in season_map[tk]:
-                        is_season = True
-        
-                final.append({
-                    **it,
-                    "ta_score": score,
-                    "buy_zone": buy_zone,
-                    "tp_zone": tp_zone,
-                    "season": is_season
-                })
-
+        if not (conds.get("enough_data") and score >= 3):
+            continue
+    
+        buy_zone, tp_zone = calc_buy_tp(df)
+        if not (buy_zone and tp_zone):
+            continue
+    
+        ok_liq, near_bonus, liq_bonus = calc_near_buy_and_liquidity(df)
+        if not ok_liq:
+            continue
+    
+        is_season = False
+        if season_map and tk in season_map:
+            if current_month in season_map[tk]:
+                is_season = True
+    
+        base_total = score + near_bonus + liq_bonus + (1 if is_season else 0)
+    
+        final.append({
+            **it,
+            "ta_score": score,
+            "buy_zone": buy_zone,
+            "tp_zone": tp_zone,
+            "near_buy_bonus": near_bonus,
+            "liq_bonus": liq_bonus,
+            "season": is_season,
+            "total_score": base_total,
+        })
 
         time.sleep(0.15)
-
+    # sort giảm dần theo total_score
+    final.sort(key=lambda x: x.get("total_score", 0), reverse=True)
     send_telegram(format_msg_fa_ta(final))
     log(f"ALL DONE (FA+TA). Final={len(final)}")
 
