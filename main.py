@@ -20,11 +20,12 @@ TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 SHEET_CSV_URL = os.getenv("SHEET_CSV_URL", "").strip()
 
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
-SEASONALITY_FILE = "seasonality_cache.json"
-
+FA_CACHE_FILE = os.path.join(CACHE_DIR, "fa_cache.json")
+SEASONALITY_FILE = os.path.join(CACHE_DIR, "seasonality_cache.json")
 
 def log(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
