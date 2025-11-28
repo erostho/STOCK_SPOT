@@ -289,7 +289,9 @@ def run_fa_update_vnstock(tickers):
     for i, tk in enumerate(tickers, 1):
         fa = get_fa_one_ticker_vnstock(tk)
         if fa:
+            fa["fa_growth_score"] = calc_fa_growth_score(tk)
             rows.append(fa)
+
         if i % 20 == 0:
             log(f"…đã lấy FA {i}/{len(tickers)} mã")
         time.sleep(0.2)
@@ -347,6 +349,35 @@ def analyze_fa(df: pd.DataFrame):
 
     log(f"✅ FA PASS (vnstock): {len(fa_pass)} mã")
     return fa_pass
+def calc_fa_growth_score(ticker: str, years: int = 5):
+    try:
+        stock = Vnstock().stock(symbol=ticker, source="VCI")
+        df = stock.finance.income_statement(period="year", dropna=True)
+        if df is None or df.empty: return 0
+
+        df = df.tail(years)
+
+        col_np = None
+        for c in df.columns:
+            k = str(c).lower().replace(" ", "")
+            if "netprofit" in k or "lnst" in k or "loinhuansauthue" in k:
+                col_np = c; break
+        if col_np is None: return 0
+
+        lst = df[col_np].astype(float).dropna().tolist()
+        if len(lst) < 3: return 0
+
+        last = lst[-3:]
+
+        score = 0
+        if all(x > 0 for x in last): score += 1
+        if last[0] > 0:
+            cagr = (last[-1]/last[0])**(1/(len(last)-1)) - 1
+            if cagr > 0.05: score += 1
+
+        return score
+    except:
+        return 0
 
 # ============================================================
 # B3) TA TỪ TCBS (OHLC DAILY)
@@ -594,6 +625,58 @@ def format_msg_ta_only(stocks):
     msg = f"📈 [{today}] Mã <30k đạt TA (≥3/5):\n" + "\n".join(lines)
     return msg
 
+def log_signals_to_csv(stocks, mode_label: str):
+    """
+    Ghi log tín hiệu vào signals_log.csv để backtest sau này.
+    mode_label: 'TA_ONLY' hoặc 'FA_TA'
+    """
+    if not stocks:
+        return
+
+    log_path = os.path.join(BASE_DIR, "signals_log.csv")
+    file_exists = os.path.exists(log_path)
+
+    fieldnames = [
+        "date", "mode", "ticker",
+        "buy_low", "buy_high",
+        "tp_low", "tp_high",
+        "ta_score", "fa_growth_score",
+        "near_buy_bonus", "liq_bonus", "stage2_bonus",
+        "season", "total_score"
+    ]
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    with open(log_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+
+        for s in stocks:
+            buy = s.get("buy_zone")
+            tp  = s.get("tp_zone")
+            if not (buy and tp):
+                continue
+
+            row = {
+                "date": today,
+                "mode": mode_label,
+                "ticker": s.get("ticker"),
+                "buy_low":  buy[0],
+                "buy_high": buy[1],
+                "tp_low":   tp[0],
+                "tp_high":  tp[1],
+                "ta_score": s.get("ta_score"),
+                "fa_growth_score": s.get("fa_growth_score"),
+                "near_buy_bonus": s.get("near_buy_bonus"),
+                "liq_bonus": s.get("liq_bonus"),
+                "stage2_bonus": s.get("stage2_bonus"),
+                "season": int(bool(s.get("season"))),
+                "total_score": s.get("total_score"),
+            }
+            writer.writerow(row)
+
+    log(f"📝 Đã ghi {len(stocks)} tín hiệu vào signals_log.csv ({mode_label}).")
 
 # ============================================================
 # MAIN
@@ -661,7 +744,16 @@ def main():
                 if current_month in season_map[tk]:
                     is_season = True
         
-            base_total = score + near_bonus + liq_bonus + (1 if is_season else 0)
+            fa_growth = s.get("fa_growth_score", 0) or 0
+            base_total = (
+                score
+                + near_bonus
+                + liq_bonus
+                + stage2_bonus
+                + (1 if is_season else 0)
+                + fa_growth * 0.5       # BONUS cho FA growth
+            )
+
         
             final.append({
                 "ticker": tk,
@@ -671,12 +763,14 @@ def main():
                 "near_buy_bonus": near_bonus,
                 "liq_bonus": liq_bonus,
                 "season": is_season,
+                "fa_growth_score": fa_growth,
                 "total_score": base_total,
             })
 
             time.sleep(0.15)
         # sort giảm dần theo total_score
         final.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+        log_signals_to_csv(final, mode_label="TA_ONLY")
         send_telegram(format_msg_ta_only(final))
         log(f"ALL DONE (TA-only). Final={len(final)}")
         return
@@ -708,7 +802,16 @@ def main():
             if current_month in season_map[tk]:
                 is_season = True
     
-        base_total = score + near_bonus + liq_bonus + (1 if is_season else 0)
+        fa_growth = s.get("fa_growth_score", 0) or 0
+        base_total = (
+            score
+            + near_bonus
+            + liq_bonus
+            + stage2_bonus
+            + (1 if is_season else 0)
+            + fa_growth * 0.5       # BONUS cho FA growth
+        )
+
     
         final.append({
             **it,
@@ -718,12 +821,14 @@ def main():
             "near_buy_bonus": near_bonus,
             "liq_bonus": liq_bonus,
             "season": is_season,
+            "fa_growth_score": fa_growth,
             "total_score": base_total,
         })
 
         time.sleep(0.15)
     # sort giảm dần theo total_score
     final.sort(key=lambda x: x.get("total_score", 0), reverse=True)
+    log_signals_to_csv(final, mode_label="TA_ONLY")
     send_telegram(format_msg_fa_ta(final))
     log(f"ALL DONE (FA+TA). Final={len(final)}")
 
