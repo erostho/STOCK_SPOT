@@ -513,7 +513,7 @@ def calc_buy_tp(df):
 # ========================
 #  EXTRA: NEAR BUY + LIQ + STAGE 2
 # ========================
-LIQ_VALUE_MIN = 3e9   # giá trị giao dịch TB 20 phiên tối thiểu (3 tỷ)
+LIQ_VALUE_MIN = 1e9   # giá trị giao dịch TB 20 phiên tối thiểu (3 tỷ)
 
 def calc_near_buy_and_liquidity(df):
     """
@@ -527,7 +527,7 @@ def calc_near_buy_and_liquidity(df):
     - stage2_bonus:
         +1 nếu Close > MA20 > MA50 > MA100
     """
-    if df is None or len(df) < 60:
+    if df is None or len(df) < 40:
         return False, 0, 0, 0
 
     close = float(df["close"].iloc[-1])
@@ -558,10 +558,14 @@ def calc_near_buy_and_liquidity(df):
     value = df["close"] * df["volume"]
     value20 = float(value.rolling(20).mean().iloc[-1])
 
-    if pd.isna(value20) or value20 < LIQ_VALUE_MIN:
+    if pd.isna(value20):
         return False, 0, 0, 0
-
-    liq_bonus = 1 if value20 >= 2 * LIQ_VALUE_MIN else 0
+    
+    # Thanh khoản < ngưỡng: vẫn cho pass nhưng không cộng liq_bonus
+    if value20 < LIQ_VALUE_MIN:
+        liq_bonus = 0
+    else:
+        liq_bonus = 1 if value20 >= 2 * LIQ_VALUE_MIN else 0
 
     stage2_bonus = 1 if (close > ma20 > ma50 > ma100) else 0
 
