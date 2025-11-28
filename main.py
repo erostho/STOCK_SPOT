@@ -24,8 +24,8 @@ SHEET_CSV_URL = os.getenv("SHEET_CSV_URL", "").strip()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
-FA_CACHE_FILE = "fa_cache.json"
-SEASONALITY_FILE = "seasonality_cache.json"
+FA_CACHE_FILE = os.path.join(CACHE_DIR, "fa_cache.json")
+SEASONALITY_FILE = os.path.join(CACHE_DIR, "seasonality_cache.json")
 
 
 def log(msg: str):
