@@ -745,19 +745,17 @@ def main():
             buy_zone, tp_zone = calc_buy_tp(df)
             if not (buy_zone and tp_zone):
                 continue
-        
             # Tính near_buy_bonus + liquidity filter
             ok_liq, near_bonus, liq_bonus, stage2_bonus = calc_near_buy_and_liquidity(df)
 
             if not ok_liq:
-                continue
-        
+                continue    
             is_season = False
             if season_map and tk in season_map:
                 if current_month in season_map[tk]:
                     is_season = True
         
-            fa_growth = s.get("fa_growth_score", 0) or 0
+            fa_growth = 0
             base_total = (
                 score
                 + near_bonus
@@ -817,7 +815,7 @@ def main():
             if current_month in season_map[tk]:
                 is_season = True
     
-        fa_growth = s.get("fa_growth_score", 0) or 0
+        fa_growth = it.get("fa_growth_score", 0) or 0
         base_total = (
             score
             + near_bonus
