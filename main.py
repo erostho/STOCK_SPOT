@@ -12,6 +12,7 @@ import pandas as pd
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 import ta
+import csv
 from vnstock import Vnstock, Quote
 
 
