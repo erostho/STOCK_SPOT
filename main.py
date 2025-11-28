@@ -502,31 +502,39 @@ def calc_buy_tp(df):
 # ========================
 LIQ_VALUE_MIN = 3e9   # giá trị giao dịch TB 20 phiên tối thiểu (3 tỷ)
 
-
 def calc_near_buy_and_liquidity(df):
     """
     - near_buy_bonus:
-        +2 điểm nếu giá hiện tại cách MA20 < 3%
-        +1 điểm nếu cách MA20 < 6%
+        +2 nếu |price - MA20| < 3%
+        +1 nếu < 6%
         +0 nếu xa hơn
     - liquidity:
         loại nếu GTGD TB20 < LIQ_VALUE_MIN
-        +1 điểm nếu GTGD TB20 >= 2 * LIQ_VALUE_MIN
-        +0 nếu chỉ vừa đủ
+        +1 nếu >= 2 * LIQ_VALUE_MIN
+    - stage2_bonus:
+        +1 nếu Close > MA20 > MA50 > MA100
+        0 nếu không
+
     return:
-        (ok:bool, near_buy_bonus:int, liq_bonus:int)
+        (ok:bool, near_buy_bonus:int, liq_bonus:int, stage2_bonus:int)
     """
-    if df is None or len(df) < 25:
-        return False, 0, 0
+    if df is None or len(df) < 60:
+        return False, 0, 0, 0
 
     close = float(df["close"].iloc[-1])
-    # MA20 đã được tính sẵn trong technical_signals hoặc calc_buy_tp
+
+    # MA20 / 50 / 100
     if "ma20" not in df.columns:
         df["ma20"] = df["close"].rolling(20).mean()
-    ma20 = float(df["ma20"].iloc[-1])
+    df["ma50"]  = df["close"].rolling(50).mean()
+    df["ma100"] = df["close"].rolling(100).mean()
 
-    if ma20 <= 0 or pd.isna(ma20) or close <= 0:
-        return False, 0, 0
+    ma20  = float(df["ma20"].iloc[-1])
+    ma50  = float(df["ma50"].iloc[-1])
+    ma100 = float(df["ma100"].iloc[-1])
+
+    if any(pd.isna(x) or x <= 0 for x in [close, ma20, ma50, ma100]):
+        return False, 0, 0, 0
 
     # khoảng cách tới MA20
     dist = abs(close - ma20) / ma20
@@ -537,23 +545,26 @@ def calc_near_buy_and_liquidity(df):
     else:
         near_bonus = 0
 
-    # thanh khoản: giá trị giao dịch TB20
+    # thanh khoản: GTGD TB20
     if "volume" not in df.columns or df["volume"].isna().all():
-        return False, 0, 0
+        return False, 0, 0, 0
 
     value = df["close"] * df["volume"]
     value20 = float(value.rolling(20).mean().iloc[-1])
 
     if pd.isna(value20) or value20 < LIQ_VALUE_MIN:
-        # thanh khoản quá thấp -> loại
-        return False, 0, 0
+        return False, 0, 0, 0
 
     if value20 >= 2 * LIQ_VALUE_MIN:
         liq_bonus = 1
     else:
         liq_bonus = 0
 
-    return True, near_bonus, liq_bonus
+    # Stage 2: Close > MA20 > MA50 > MA100
+    stage2_bonus = 1 if (close > ma20 > ma50 > ma100) else 0
+
+    return True, near_bonus, liq_bonus, stage2_bonus
+
 
 # ============================================================
 # TELEGRAM FORMAT & SEND
@@ -736,7 +747,8 @@ def main():
                 continue
         
             # Tính near_buy_bonus + liquidity filter
-            ok_liq, near_bonus, liq_bonus = calc_near_buy_and_liquidity(df)
+            ok_liq, near_bonus, liq_bonus, stage2_bonus = calc_near_buy_and_liquidity(df)
+
             if not ok_liq:
                 continue
         
@@ -762,6 +774,7 @@ def main():
                 "buy_zone": buy_zone,
                 "tp_zone": tp_zone,
                 "near_buy_bonus": near_bonus,
+                "stage2_bonus": stage2_bonus,
                 "liq_bonus": liq_bonus,
                 "season": is_season,
                 "fa_growth_score": fa_growth,
@@ -794,7 +807,8 @@ def main():
         if not (buy_zone and tp_zone):
             continue
     
-        ok_liq, near_bonus, liq_bonus = calc_near_buy_and_liquidity(df)
+        ok_liq, near_bonus, liq_bonus, stage2_bonus = calc_near_buy_and_liquidity(df)
+
         if not ok_liq:
             continue
     
@@ -822,6 +836,7 @@ def main():
             "near_buy_bonus": near_bonus,
             "liq_bonus": liq_bonus,
             "season": is_season,
+            "stage2_bonus": stage2_bonus,
             "fa_growth_score": fa_growth,
             "total_score": base_total,
         })
