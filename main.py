@@ -1,8 +1,9 @@
 # ===========================
-#  VN STOCK BOT: FA = vnstock, TA = TCBS
+#  VN STOCK BOT PRO: FA = vnstock, TA = TCBS
 #  - B1: Lấy danh sách mã từ Google Sheet (cp < 10k bạn đã lọc sẵn)
-#  - B2: FA từ vnstock (VCI source) -> cache 7 ngày
-#  - B3: TA từ TCBS (OHLC daily) -> mỗi lần scan
+#  - B2: FA từ vnstock (VCI source) -> cache 7 ngày (+ growth bonus)
+#  - B3: TA từ TCBS (OHLC daily) + near-buy + liquidity + stage 2 + seasonality
+#  - B4: Market Regime VNINDEX -> bonus vào total_score
 # ===========================
 
 import os, sys, json, time
@@ -15,18 +16,17 @@ import ta
 import csv
 from vnstock import Vnstock, Quote
 
-
 # ---------- ENV & CACHE DIR ----------
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 SHEET_CSV_URL = os.getenv("SHEET_CSV_URL", "").strip()
 
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
-FA_CACHE_FILE = os.path.join(CACHE_DIR, "fa_cache.json")
-SEASONALITY_FILE = os.path.join(CACHE_DIR, "seasonality_cache.json")
+FA_CACHE_FILE = "fa_cache.json"
+SEASONALITY_FILE = "seasonality_cache.json"
+
 
 def log(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -56,7 +56,7 @@ SESSION = make_session()
 
 # ---------- SIMPLE CACHE ----------
 def cache_get(name, ttl_sec):
-    p = os.path.join(CACHE_DIR, name)
+    p = os.path.join(CACHE_DIR, name) if not os.path.isabs(name) else name
     try:
         if os.path.exists(p) and (time.time() - os.path.getmtime(p) < ttl_sec):
             with open(p, "r", encoding="utf-8") as f:
@@ -66,12 +66,17 @@ def cache_get(name, ttl_sec):
     return None
 
 def cache_set(name, obj):
-    p = os.path.join(CACHE_DIR, name)
+    p = os.path.join(CACHE_DIR, name) if not os.path.isabs(name) else name
     try:
         with open(p, "w", encoding="utf-8") as f:
             json.dump(obj, f, ensure_ascii=False)
     except Exception:
         pass
+
+# ============================================================
+# SEASONALITY (MÙA VỤ) – dùng vnstock Quote.history
+# ============================================================
+
 def get_monthly_returns_vnstock(ticker, years=10):
     """
     Lấy dữ liệu 1D ~10 năm bằng vnstock Quote.history,
@@ -79,7 +84,7 @@ def get_monthly_returns_vnstock(ticker, years=10):
     """
     try:
         tk = str(ticker).upper().strip()
-        quote = Quote(symbol=tk, source='VCI')   # hoặc 'TCBS' cũng được
+        quote = Quote(symbol=tk, source="VCI")
 
         end = datetime.now().date()
         start = end - timedelta(days=365 * years)
@@ -87,12 +92,11 @@ def get_monthly_returns_vnstock(ticker, years=10):
         df = quote.history(
             start=start.strftime("%Y-%m-%d"),
             end=end.strftime("%Y-%m-%d"),
-            interval='1D'
+            interval="1D",
         )
         if df is None or df.empty:
             return {}
 
-        # cột thời gian trong vnstock là 'time'
         df["time"] = pd.to_datetime(df["time"])
         df = df.sort_values("time")
         df["year"] = df["time"].dt.year
@@ -109,8 +113,6 @@ def get_monthly_returns_vnstock(ticker, years=10):
     except Exception as e:
         log(f"⚠️ Seasonality {ticker} lỗi: {e}")
         return {}
-
-
 
 def rebuild_seasonality_cache(tickers):
     """
@@ -137,13 +139,11 @@ def rebuild_seasonality_cache(tickers):
         if not avg_month:
             continue
 
-        # Lọc tháng dương & top 4
         items = [(m, r) for m, r in avg_month.items() if r > 0]
         if not items:
             continue
-        # sort theo return desc
         items.sort(key=lambda x: x[1], reverse=True)
-        top = items[:4]   # lấy tối đa 4 tháng "đỉnh" nhất
+        top = items[:4]
         good_months[tk] = [m for m, _ in top]
 
     built_key = datetime.now().strftime("%Y-%m")
@@ -152,13 +152,11 @@ def rebuild_seasonality_cache(tickers):
     log(f"✅ Seasonality cache xong: {len(good_months)} mã.")
     return good_months
 
-
 def load_seasonality_cache():
-    data = cache_get(SEASONALITY_FILE, ttl_sec=365*24*3600)  # TTL 1 năm
+    data = cache_get(SEASONALITY_FILE, ttl_sec=365 * 24 * 3600)
     if not data:
         return None, {}
     return data.get("built_key"), data.get("good_months", {})
-
 
 def ensure_seasonality(tickers):
     """
@@ -190,20 +188,22 @@ def get_tickers_from_sheet():
         log(f"❌ Lỗi đọc sheet: {e}")
         return []
 
-    # tìm cột mã: "Mã", "ma", "ticker", "symbol", "code"
     col_ticker = None
     for c in df.columns:
         if str(c).strip().lower() in ["mã", "ma", "ticker", "symbol", "code"]:
             col_ticker = c
             break
     if col_ticker is None:
-        # fallback cột A
         col_ticker = df.columns[0]
 
     tks = (
         df[col_ticker]
-        .astype(str).str.upper().str.strip()
-        .dropna().unique().tolist()
+        .astype(str)
+        .str.upper()
+        .str.strip()
+        .dropna()
+        .unique()
+        .tolist()
     )
     tks = sorted(set([tk for tk in tks if tk and tk != "NAN"]))
     log(f"✅ Sheet lấy được {len(tks)} mã cp (đã lọc sẵn).")
@@ -214,10 +214,6 @@ def get_tickers_from_sheet():
 # ============================================================
 
 def _find_col(df: pd.DataFrame, keywords):
-    """
-    Tìm tên cột chứa 1 trong các keyword (bỏ khoảng trắng, lowercase).
-    Dùng để dò 'EPS', 'ROE', 'P/E', 'Debt/Equity'… trong bảng ratio vnstock.
-    """
     kws = [k.lower().replace(" ", "") for k in keywords]
     for col in df.columns:
         key = str(col).lower().replace(" ", "").replace("_", "")
@@ -240,13 +236,12 @@ def get_fa_one_ticker_vnstock(tk: str):
             log(f"🟡 FA vnstock rỗng cho {symbol}")
             return None
 
-        # lấy dòng mới nhất (thường là năm gần nhất)
         row = ratio_df.iloc[-1]
 
         col_eps = _find_col(ratio_df, ["eps"])
         col_roe = _find_col(ratio_df, ["roe"])
-        col_pe  = _find_col(ratio_df, ["p/e", "pe"])
-        col_de  = _find_col(ratio_df, ["nợ/vốn", "debttoequity", "debt/equity", "d/e"])
+        col_pe = _find_col(ratio_df, ["p/e", "pe"])
+        col_de = _find_col(ratio_df, ["nợ/vốn", "debttoequity", "debt/equity", "d/e"])
 
         def _get(row, col):
             if col is None:
@@ -259,8 +254,8 @@ def get_fa_one_ticker_vnstock(tk: str):
 
         eps = _get(row, col_eps)
         roe = _get(row, col_roe)
-        pe  = _get(row, col_pe)
-        de  = _get(row, col_de)
+        pe = _get(row, col_pe)
+        de = _get(row, col_de)
 
         if eps is None or roe is None or pe is None:
             log(f"🟡 Thiếu cột FA (EPS/ROE/PE) cho {symbol}")
@@ -277,6 +272,48 @@ def get_fa_one_ticker_vnstock(tk: str):
     except Exception as e:
         log(f"⚠️ FA vnstock lỗi {symbol}: {e}")
         return None
+
+def calc_fa_growth_score(ticker: str, years: int = 5):
+    """
+    BONUS tăng trưởng FA 3 năm:
+      +1 nếu LNST 3 năm gần nhất đều dương
+      +1 nếu CAGR LNST > 5%
+    Không dùng để loại mã, chỉ bonus.
+    """
+    try:
+        stock = Vnstock().stock(symbol=ticker, source="VCI")
+        df = stock.finance.income_statement(period="year", dropna=True)
+        if df is None or df.empty:
+            return 0
+
+        df = df.tail(years)
+
+        col_np = None
+        for c in df.columns:
+            k = str(c).lower().replace(" ", "")
+            if "netprofit" in k or "lnst" in k or "loinhuansauthue" in k:
+                col_np = c
+                break
+        if col_np is None:
+            return 0
+
+        lst = df[col_np].astype(float).dropna().tolist()
+        if len(lst) < 3:
+            return 0
+
+        last = lst[-3:]
+        score = 0
+        if all(x > 0 for x in last):
+            score += 1
+        if last[0] > 0:
+            cagr = (last[-1] / last[0]) ** (1 / (len(last) - 1)) - 1
+            if cagr > 0.05:
+                score += 1
+
+        return score
+    except Exception as e:
+        log(f"⚠️ FA_growth lỗi {ticker}: {e}")
+        return 0
 
 def run_fa_update_vnstock(tickers):
     """
@@ -299,19 +336,19 @@ def run_fa_update_vnstock(tickers):
         time.sleep(0.2)
 
     df = pd.DataFrame(rows)
-    cache_set("fa_cache.json", {"rows": rows, "ts": int(time.time())})
+    cache_set(FA_CACHE_FILE, {"rows": rows, "ts": int(time.time())})
     log(f"✅ Lưu cache FA (vnstock): {len(df)} mã (7 ngày).")
     return df
 
 def load_fa_cache():
-    cached = cache_get("fa_cache.json", ttl_sec=7 * 24 * 3600)
+    cached = cache_get(FA_CACHE_FILE, ttl_sec=7 * 24 * 3600)
     if cached and cached.get("rows"):
         return pd.DataFrame(cached["rows"])
     return pd.DataFrame()
 
 def analyze_fa(df: pd.DataFrame):
     """
-    FA filter (đơn giản hơn bản VNDIRECT cũ):
+    FA filter:
       - EPS > 300
       - ROE > 8 (%)
       - 0 < PE < 15
@@ -323,12 +360,13 @@ def analyze_fa(df: pd.DataFrame):
     fa_pass = []
     for _, r in df.iterrows():
         try:
-            tk  = str(r["ticker"]).upper()
+            tk = str(r["ticker"]).upper()
             eps = float(r.get("eps", 0) or 0)
             roe = float(r.get("roe", 0) or 0)
-            pe  = float(r.get("pe",  0) or 0)
-            de  = r.get("de", None)
-            de  = float(de) if de is not None else None
+            pe = float(r.get("pe", 0) or 0)
+            de = r.get("de", None)
+            de = float(de) if de is not None else None
+            fa_growth = int(r.get("fa_growth_score", 0) or 0)
         except Exception:
             continue
 
@@ -347,39 +385,11 @@ def analyze_fa(df: pd.DataFrame):
             "roe": roe,
             "pe": pe,
             "de": de,
+            "fa_growth_score": fa_growth,
         })
 
     log(f"✅ FA PASS (vnstock): {len(fa_pass)} mã")
     return fa_pass
-def calc_fa_growth_score(ticker: str, years: int = 5):
-    try:
-        stock = Vnstock().stock(symbol=ticker, source="VCI")
-        df = stock.finance.income_statement(period="year", dropna=True)
-        if df is None or df.empty: return 0
-
-        df = df.tail(years)
-
-        col_np = None
-        for c in df.columns:
-            k = str(c).lower().replace(" ", "")
-            if "netprofit" in k or "lnst" in k or "loinhuansauthue" in k:
-                col_np = c; break
-        if col_np is None: return 0
-
-        lst = df[col_np].astype(float).dropna().tolist()
-        if len(lst) < 3: return 0
-
-        last = lst[-3:]
-
-        score = 0
-        if all(x > 0 for x in last): score += 1
-        if last[0] > 0:
-            cagr = (last[-1]/last[0])**(1/(len(last)-1)) - 1
-            if cagr > 0.05: score += 1
-
-        return score
-    except:
-        return 0
 
 # ============================================================
 # B3) TA TỪ TCBS (OHLC DAILY)
@@ -395,7 +405,7 @@ def get_ohlc_days_tcbs(tk: str, days: int = 180):
     start_date = end_date - timedelta(days=int(days * 1.2))
 
     start_ts = int(time.mktime(datetime.combine(start_date, datetime.min.time()).timetuple()))
-    end_ts   = int(time.mktime(datetime.combine(end_date,   datetime.min.time()).timetuple()))
+    end_ts = int(time.mktime(datetime.combine(end_date, datetime.min.time()).timetuple()))
 
     url = "https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term"
     params = {
@@ -461,24 +471,29 @@ def technical_signals(df: pd.DataFrame):
     df["ma20"] = df["close"].rolling(20).mean()
     df["vol_ma20"] = df["volume"].rolling(20).mean()
 
-    latest = df.iloc[-1]; prev = df.iloc[-2]
-    conds["ADX>20_DI+>DI-"]   = bool((latest["adx"] > 20) and (latest["di_pos"] > latest["di_neg"]))
-    conds["RSI>50_cross_up"]  = bool((latest["rsi"] > 50) and (prev["rsi"] <= 50))
-    conds["Break_20_high"]    = bool(latest["close"] > float(df["close"].iloc[-20:-1].max()))
-    conds["Vol_up_3_days"]    = bool(df["volume"].iloc[-1] > df["volume"].iloc[-2] > df["volume"].iloc[-3])
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+    conds["ADX>20_DI+>DI-"] = bool((latest["adx"] > 20) and (latest["di_pos"] > latest["di_neg"]))
+    conds["RSI>50_cross_up"] = bool((latest["rsi"] > 50) and (prev["rsi"] <= 50))
+    conds["Break_20_high"] = bool(latest["close"] > float(df["close"].iloc[-20:-1].max()))
+    conds["Vol_up_3_days"] = bool(df["volume"].iloc[-1] > df["volume"].iloc[-2] > df["volume"].iloc[-3])
     conds["Close>MA20_VolSp"] = bool((latest["close"] > latest["ma20"]) and (latest["volume"] > 1.5 * latest["vol_ma20"]))
 
     score = sum(1 for v in conds.values() if v)
     conds["enough_data"] = True
     conds["score_TA_true"] = score
     return conds, score
+
 def calc_buy_tp(df):
     """
     Buy zone = MA20 ± 3%
-    TP zone  = Fibonacci extension 1.618 – 2.0 từ Swing High
+    TP zone  = Fibonacci extension 1.618 – 2.0 từ Swing High 20 phiên
     """
     if df is None or len(df) < 30:
         return None, None
+
+    if "ma20" not in df.columns:
+        df["ma20"] = df["close"].rolling(20).mean()
 
     latest = df.iloc[-1]
     ma20 = latest["ma20"]
@@ -486,20 +501,17 @@ def calc_buy_tp(df):
     if pd.isna(ma20) or ma20 <= 0:
         return None, None
 
-    # --- Buy zone ---
-    buy_low  = round(ma20 * 0.97)
+    buy_low = round(ma20 * 0.97)
     buy_high = round(ma20 * 1.03)
 
-    # --- TP zone (Fibonacci extension) ---
-    # Swing High = đỉnh cao nhất 20 phiên gần nhất
     swing_high = max(df["close"].iloc[-20:])
-
-    tp_low  = round(swing_high * 1.618)  # Fibo 161.8%
-    tp_high = round(swing_high * 2.0)    # Fibo 200%
+    tp_low = round(swing_high * 1.618)
+    tp_high = round(swing_high * 2.0)
 
     return (buy_low, buy_high), (tp_low, tp_high)
+
 # ========================
-#  EXTRA: NEAR BUY + LIQ
+#  EXTRA: NEAR BUY + LIQ + STAGE 2
 # ========================
 LIQ_VALUE_MIN = 3e9   # giá trị giao dịch TB 20 phiên tối thiểu (3 tỷ)
 
@@ -514,30 +526,24 @@ def calc_near_buy_and_liquidity(df):
         +1 nếu >= 2 * LIQ_VALUE_MIN
     - stage2_bonus:
         +1 nếu Close > MA20 > MA50 > MA100
-        0 nếu không
-
-    return:
-        (ok:bool, near_buy_bonus:int, liq_bonus:int, stage2_bonus:int)
     """
     if df is None or len(df) < 60:
         return False, 0, 0, 0
 
     close = float(df["close"].iloc[-1])
 
-    # MA20 / 50 / 100
     if "ma20" not in df.columns:
         df["ma20"] = df["close"].rolling(20).mean()
-    df["ma50"]  = df["close"].rolling(50).mean()
+    df["ma50"] = df["close"].rolling(50).mean()
     df["ma100"] = df["close"].rolling(100).mean()
 
-    ma20  = float(df["ma20"].iloc[-1])
-    ma50  = float(df["ma50"].iloc[-1])
+    ma20 = float(df["ma20"].iloc[-1])
+    ma50 = float(df["ma50"].iloc[-1])
     ma100 = float(df["ma100"].iloc[-1])
 
     if any(pd.isna(x) or x <= 0 for x in [close, ma20, ma50, ma100]):
         return False, 0, 0, 0
 
-    # khoảng cách tới MA20
     dist = abs(close - ma20) / ma20
     if dist < 0.03:
         near_bonus = 2
@@ -546,7 +552,6 @@ def calc_near_buy_and_liquidity(df):
     else:
         near_bonus = 0
 
-    # thanh khoản: GTGD TB20
     if "volume" not in df.columns or df["volume"].isna().all():
         return False, 0, 0, 0
 
@@ -556,25 +561,66 @@ def calc_near_buy_and_liquidity(df):
     if pd.isna(value20) or value20 < LIQ_VALUE_MIN:
         return False, 0, 0, 0
 
-    if value20 >= 2 * LIQ_VALUE_MIN:
-        liq_bonus = 1
-    else:
-        liq_bonus = 0
+    liq_bonus = 1 if value20 >= 2 * LIQ_VALUE_MIN else 0
 
-    # Stage 2: Close > MA20 > MA50 > MA100
     stage2_bonus = 1 if (close > ma20 > ma50 > ma100) else 0
 
     return True, near_bonus, liq_bonus, stage2_bonus
 
+# ============================================================
+# MARKET REGIME: VNINDEX TREND FILTER
+# ============================================================
+
+def get_market_regime():
+    """
+    Market regime:
+      +1: uptrend (VNINDEX close > MA50 > MA100)
+       0: neutral
+      -1: downtrend (VNINDEX close < MA50 < MA100)
+    Dùng để bonus/penalty nhẹ vào total_score.
+    """
+    try:
+        quote = Quote(symbol="VNINDEX", source="VCI")
+        end = datetime.now().date()
+        start = end - timedelta(days=365)
+        df = quote.history(start=start.strftime("%Y-%m-%d"),
+                           end=end.strftime("%Y-%m-%d"),
+                           interval="1D")
+        if df is None or df.empty:
+            return 0
+
+        df["time"] = pd.to_datetime(df["time"])
+        df = df.sort_values("time")
+        df["ma50"] = df["close"].rolling(50).mean()
+        df["ma100"] = df["close"].rolling(100).mean()
+
+        latest = df.iloc[-1]
+        close = float(latest["close"])
+        ma50 = float(latest["ma50"])
+        ma100 = float(latest["ma100"])
+
+        if any(pd.isna(x) or x <= 0 for x in [close, ma50, ma100]):
+            return 0
+
+        if close > ma50 > ma100:
+            return 1
+        if close < ma50 < ma100:
+            return -1
+        return 0
+    except Exception as e:
+        log(f"⚠️ Market regime VNINDEX lỗi: {e}")
+        return 0
 
 # ============================================================
 # TELEGRAM FORMAT & SEND
 # ============================================================
 
 def send_telegram(text):
-    token = TELEGRAM_TOKEN; chat = TELEGRAM_CHAT_ID
+    token = TELEGRAM_TOKEN
+    chat = TELEGRAM_CHAT_ID
     if not token or not chat:
-        log("❌ Thiếu TELEGRAM_TOKEN / TELEGRAM_CHAT_ID"); return
+        log("❌ Thiếu TELEGRAM_TOKEN / TELEGRAM_CHAT_ID")
+        return
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         r = requests.post(url, data={"chat_id": chat, "text": text}, timeout=15)
@@ -586,59 +632,42 @@ def send_telegram(text):
         log(f"❌ Telegram error: {e}")
 
 def format_msg_fa_ta(stocks):
-    """
-    Mỗi mã 1 dòng:
-    MÃ; BUY_LOW-BUY_HIGH; TP_LOW-TP_HIGH
-    (Áp dụng cho các mã đạt FA + TA)
-    """
     today = datetime.now().strftime("%d/%m/%Y")
-
     if not stocks:
         return f"📉 [{today}] Không có mã nào đạt FA + TA (≥3/5)."
 
     lines = []
     for s in stocks:
-        tk    = s["ticker"]
-        buy   = s.get("buy_zone")
-        tp    = s.get("tp_zone")
+        tk = s["ticker"]
+        buy = s.get("buy_zone")
+        tp = s.get("tp_zone")
         score = s.get("ta_score", "?")
-        star  = "⭐️ " if s.get("season") else ""
-    
+        star = "⭐️ " if s.get("season") else ""
         if buy and tp:
             lines.append(f"{star}{tk}; {buy[0]}-{buy[1]}; {tp[0]}-{tp[1]}; TA:{score}/5")
-    
 
     msg = f"💹 [{today}] Mã <30k đạt FA + TA (≥3/5):\n" + "\n".join(lines)
     return msg
 
-
 def format_msg_ta_only(stocks):
-    """
-    Mỗi mã 1 dòng:
-    MÃ; BUY_LOW-BUY_HIGH; TP_LOW-TP_HIGH
-    """
     today = datetime.now().strftime("%d/%m/%Y")
-
     if not stocks:
         return f"📉 [{today}] Không có mã nào đạt TA (≥3/5)."
 
     lines = []
     for s in stocks:
-        tk    = s["ticker"]
-        buy   = s.get("buy_zone")
-        tp    = s.get("tp_zone")
+        tk = s["ticker"]
+        buy = s.get("buy_zone")
+        tp = s.get("tp_zone")
         score = s.get("ta_score", "?")
-        star  = "⭐️ " if s.get("season") else ""
-    
+        star = "⭐️ " if s.get("season") else ""
         if buy and tp:
             lines.append(f"{star}{tk}; {buy[0]}-{buy[1]}; {tp[0]}-{tp[1]}; TA:{score}/5")
-
-
 
     msg = f"📈 [{today}] Mã <30k đạt TA (≥3/5):\n" + "\n".join(lines)
     return msg
 
-def log_signals_to_csv(stocks, mode_label: str):
+def log_signals_to_csv(stocks, mode_label: str, market_regime: int):
     """
     Ghi log tín hiệu vào signals_log.csv để backtest sau này.
     mode_label: 'TA_ONLY' hoặc 'FA_TA'
@@ -655,7 +684,7 @@ def log_signals_to_csv(stocks, mode_label: str):
         "tp_low", "tp_high",
         "ta_score", "fa_growth_score",
         "near_buy_bonus", "liq_bonus", "stage2_bonus",
-        "season", "total_score"
+        "season", "total_score", "market_regime",
     ]
 
     today = datetime.now().strftime("%Y-%m-%d")
@@ -667,7 +696,7 @@ def log_signals_to_csv(stocks, mode_label: str):
 
         for s in stocks:
             buy = s.get("buy_zone")
-            tp  = s.get("tp_zone")
+            tp = s.get("tp_zone")
             if not (buy and tp):
                 continue
 
@@ -675,10 +704,10 @@ def log_signals_to_csv(stocks, mode_label: str):
                 "date": today,
                 "mode": mode_label,
                 "ticker": s.get("ticker"),
-                "buy_low":  buy[0],
+                "buy_low": buy[0],
                 "buy_high": buy[1],
-                "tp_low":   tp[0],
-                "tp_high":  tp[1],
+                "tp_low": tp[0],
+                "tp_high": tp[1],
                 "ta_score": s.get("ta_score"),
                 "fa_growth_score": s.get("fa_growth_score"),
                 "near_buy_bonus": s.get("near_buy_bonus"),
@@ -686,6 +715,7 @@ def log_signals_to_csv(stocks, mode_label: str):
                 "stage2_bonus": s.get("stage2_bonus"),
                 "season": int(bool(s.get("season"))),
                 "total_score": s.get("total_score"),
+                "market_regime": market_regime,
             }
             writer.writerow(row)
 
@@ -706,67 +736,76 @@ def main():
     if not tks:
         log("⚠️ Không lấy được danh sách mã từ Sheet.")
         return
-    # Seasonality: build cache 1 lần / tháng
-    season_map = ensure_seasonality(tks)  # dict {ticker: [good_months]}
+
+    # Seasonality
+    season_map = ensure_seasonality(tks)
     current_month = datetime.now().month
 
-    # ==== FA AUTO: chỉ update FA lúc 19h Thứ 6 VN ====
+    # Market regime VNINDEX
+    market_regime = get_market_regime()
+    log(f"📊 Market regime VNINDEX = {market_regime} "
+        "(+1 uptrend / 0 neutral / -1 downtrend)")
+
+    # FA auto: chỉ update FA lúc 19h Thứ 6 VN
     now_utc = datetime.utcnow()
-    now_vn  = now_utc + timedelta(hours=7)
-    if now_vn.weekday() == 4 and now_vn.hour == 19:   # 4 = Friday
+    now_vn = now_utc + timedelta(hours=7)
+    if now_vn.weekday() == 4 and now_vn.hour == 19:
         log("🔄 Thứ 6 19h VN → CẬP NHẬT FA (vnstock)…")
         run_fa_update_vnstock(tks)
     else:
         log("⏭ Không phải 19h Thứ 6 → dùng FA cache cũ, không update.")
-    # ==== MODE = FA: cho phép bạn tự chạy bằng tay (python main.py fa) ====
+
+    # MODE = fa: cập nhật FA bằng tay
     if mode == "fa":
         log("🔄 MODE=fa → Cập nhật FA (vnstock) theo yêu cầu …")
         run_fa_update_vnstock(tks)
         log("⚡ FA Update DONE.")
         return
-    # ==== MODE = SCAN (mặc định) — chỉ đọc cache FA ====
+
+    # MODE = scan: đọc cache FA
     df_fa_cache = load_fa_cache()
     fa_list = analyze_fa(df_fa_cache) if not df_fa_cache.empty else []
 
+    regime_bonus = 1 if market_regime > 0 else (-1 if market_regime < 0 else 0)
+
+    # ===================== TA-ONLY (không dùng được FA) =====================
     if not fa_list:
         log("🟠 Không dùng được FA (cache rỗng hoặc không mã nào pass) → TA-only.")
-        # === TA-ONLY ===
         final = []
         for i, tk in enumerate(tks, 1):
             log(f"[TA-only] {i}/{len(tks)} – {tk}")
             df = get_ohlc_days_tcbs(tk, days=180)
             if df.empty:
                 continue
-        
+
             conds, score = technical_signals(df)
             if not (conds.get("enough_data") and score >= 3):
                 continue
-        
-            # Tính BUY/TP
+
             buy_zone, tp_zone = calc_buy_tp(df)
             if not (buy_zone and tp_zone):
                 continue
-            # Tính near_buy_bonus + liquidity filter
-            ok_liq, near_bonus, liq_bonus, stage2_bonus = calc_near_buy_and_liquidity(df)
 
+            ok_liq, near_bonus, liq_bonus, stage2_bonus = calc_near_buy_and_liquidity(df)
             if not ok_liq:
-                continue    
+                continue
+
             is_season = False
             if season_map and tk in season_map:
                 if current_month in season_map[tk]:
                     is_season = True
-        
+
             fa_growth = 0
-            base_total = (
+            total_score = (
                 score
                 + near_bonus
                 + liq_bonus
                 + stage2_bonus
                 + (1 if is_season else 0)
-                + fa_growth * 0.5       # BONUS cho FA growth
+                + fa_growth * 0.5
+                + regime_bonus
             )
 
-        
             final.append({
                 "ticker": tk,
                 "ta_score": score,
@@ -777,19 +816,18 @@ def main():
                 "liq_bonus": liq_bonus,
                 "season": is_season,
                 "fa_growth_score": fa_growth,
-                "total_score": base_total,
+                "total_score": total_score,
             })
 
             time.sleep(0.15)
-        # sort giảm dần theo total_score
+
         final.sort(key=lambda x: x.get("total_score", 0), reverse=True)
-        log_signals_to_csv(final, mode_label="TA_ONLY")
+        log_signals_to_csv(final, mode_label="TA_ONLY", market_regime=market_regime)
         send_telegram(format_msg_ta_only(final))
         log(f"ALL DONE (TA-only). Final={len(final)}")
         return
 
-    # Nếu FA có dữ liệu thì chạy FA -> TA
-    # === FA + TA ===
+    # ===================== FA + TA =====================
     final = []
     for i, it in enumerate(fa_list, 1):
         tk = it["ticker"]
@@ -797,36 +835,35 @@ def main():
         df = get_ohlc_days_tcbs(tk, days=180)
         if df.empty:
             continue
-    
+
         conds, score = technical_signals(df)
         if not (conds.get("enough_data") and score >= 3):
             continue
-    
+
         buy_zone, tp_zone = calc_buy_tp(df)
         if not (buy_zone and tp_zone):
             continue
-    
-        ok_liq, near_bonus, liq_bonus, stage2_bonus = calc_near_buy_and_liquidity(df)
 
+        ok_liq, near_bonus, liq_bonus, stage2_bonus = calc_near_buy_and_liquidity(df)
         if not ok_liq:
             continue
-    
+
         is_season = False
         if season_map and tk in season_map:
             if current_month in season_map[tk]:
                 is_season = True
-    
+
         fa_growth = it.get("fa_growth_score", 0) or 0
-        base_total = (
+        total_score = (
             score
             + near_bonus
             + liq_bonus
             + stage2_bonus
             + (1 if is_season else 0)
-            + fa_growth * 0.5       # BONUS cho FA growth
+            + fa_growth * 0.5
+            + regime_bonus
         )
 
-    
         final.append({
             **it,
             "ta_score": score,
@@ -837,13 +874,13 @@ def main():
             "season": is_season,
             "stage2_bonus": stage2_bonus,
             "fa_growth_score": fa_growth,
-            "total_score": base_total,
+            "total_score": total_score,
         })
 
         time.sleep(0.15)
-    # sort giảm dần theo total_score
+
     final.sort(key=lambda x: x.get("total_score", 0), reverse=True)
-    log_signals_to_csv(final, mode_label="TA_ONLY")
+    log_signals_to_csv(final, mode_label="FA_TA", market_regime=market_regime)
     send_telegram(format_msg_fa_ta(final))
     log(f"ALL DONE (FA+TA). Final={len(final)}")
 
