@@ -750,14 +750,14 @@ def main():
     log(f"📊 Market regime VNINDEX = {market_regime} "
         "(+1 uptrend / 0 neutral / -1 downtrend)")
 
-    # FA auto: chỉ update FA lúc 19h Thứ 6 VN
+    # FA auto: chỉ update FA lúc 9h Thứ 7 VN
     now_utc = datetime.utcnow()
     now_vn = now_utc + timedelta(hours=7)
-    if now_vn.weekday() == 4 and now_vn.hour == 19:
-        log("🔄 Thứ 6 19h VN → CẬP NHẬT FA (vnstock)…")
+    if now_vn.weekday() == 5 and now_vn.hour == 9:
+        log("🔄 Thứ 7 9h VN → CẬP NHẬT FA (vnstock)…")
         run_fa_update_vnstock(tks)
     else:
-        log("⏭ Không phải 19h Thứ 6 → dùng FA cache cũ, không update.")
+        log("⏭ Không phải 9h Thứ 7 → dùng FA cache cũ, không update.")
 
     # MODE = fa: cập nhật FA bằng tay
     if mode == "fa":
