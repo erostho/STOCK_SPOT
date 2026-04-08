@@ -98,10 +98,21 @@ def cache_load(path: str, ttl_sec: int):
     return None
 
 
+def _json_safe(obj):
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    return obj
+
 def cache_save(path: str, obj):
     try:
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False)
+            json.dump(_json_safe(obj), f, ensure_ascii=False)
     except Exception as e:
         log(f"⚠️ cache_save lỗi {os.path.basename(path)}: {e}")
 
@@ -243,7 +254,9 @@ def get_price_history(ticker: str, length: int = PRICE_HISTORY_BARS) -> pd.DataF
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["close"]).sort_values("time").reset_index(drop=True)
 
-    cache_all[ticker] = df.to_dict(orient="records")
+    df_cache = df.copy()
+    df_cache["time"] = df_cache["time"].astype(str)
+    cache_all[ticker] = df_cache.to_dict(orient="records")
     cache_save(PRICE_CACHE_FILE, cache_all)
     return df
 
