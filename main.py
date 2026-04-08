@@ -375,7 +375,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ma100"] = close.rolling(100).mean()
     df["ma200"] = close.rolling(200).mean()
     df["vol_ma20"] = vol.rolling(20).mean()
-    df["value"] = close * vol
+    df["value"] = close * 1000 * vol
     df["value_ma20"] = df["value"].rolling(20).mean()
 
     try:
@@ -411,6 +411,11 @@ def summarize_features(ticker: str, df: pd.DataFrame, fa: Dict, regime: int) -> 
     ma50 = _safe_float(last["ma50"])
     ma100 = _safe_float(last["ma100"])
     ma200 = _safe_float(last["ma200"])
+    close_vnd = close * 1000 if close is not None else None
+    ma20_vnd = ma20 * 1000 if ma20 is not None else None
+    ma50_vnd = ma50 * 1000 if ma50 is not None else None
+    ma100_vnd = ma100 * 1000 if ma100 is not None else None
+    ma200_vnd = ma200 * 1000 if ma200 is not None else None
     rsi = _safe_float(last["rsi"])
     adx = _safe_float(last["adx"])
     di_pos = _safe_float(last["di_pos"])
@@ -420,16 +425,18 @@ def summarize_features(ticker: str, df: pd.DataFrame, fa: Dict, regime: int) -> 
     hh20_prev = _safe_float(df["close"].iloc[-21:-1].max())
     hh60_prev = _safe_float(df["close"].iloc[-61:-1].max())
 
-    if not close or not ma20:
+    if not close_vnd or not ma20_vnd:
         return None
-
-    dist_ma20 = abs(close - ma20) / ma20 * 100 if ma20 else None
-    dist_ma50 = abs(close - ma50) / ma50 * 100 if ma50 else None
-    trend_up_short = bool(ma20 and ma50 and close > ma20 and ma20 >= ma50)
-    trend_up_mid = bool(ma50 and ma100 and close > ma50 and ma50 >= ma100)
-    stage2 = bool(ma20 and ma50 and ma100 and close > ma20 > ma50 > ma100)
-    breakout20 = bool(hh20_prev and close > hh20_prev)
-    breakout60 = bool(hh60_prev and close > hh60_prev)
+    hh20_prev_vnd = hh20_prev * 1000 if hh20_prev is not None else None
+    hh60_prev_vnd = hh60_prev * 1000 if hh60_prev is not None else None
+    
+    dist_ma20 = abs(close_vnd - ma20_vnd) / ma20_vnd * 100 if ma20_vnd else None
+    dist_ma50 = abs(close_vnd - ma50_vnd) / ma50_vnd * 100 if ma50_vnd else None
+    trend_up_short = bool(ma20_vnd and ma50_vnd and close_vnd > ma20_vnd and ma20_vnd >= ma50_vnd)
+    trend_up_mid = bool(ma50_vnd and ma100_vnd and close_vnd > ma50_vnd and ma50_vnd >= ma100_vnd)
+    stage2 = bool(ma20_vnd and ma50_vnd and ma100_vnd and close_vnd > ma20_vnd > ma50_vnd > ma100_vnd)
+    breakout20 = bool(hh20_prev_vnd and close_vnd > hh20_prev_vnd)
+    breakout60 = bool(hh60_prev_vnd and close_vnd > hh60_prev_vnd)
     pullback_uptrend = bool(trend_up_short and dist_ma20 is not None and dist_ma20 <= 4)
     retest_breakout = bool(prev["close"] > df["close"].iloc[-22:-2].max() and dist_ma20 is not None and dist_ma20 <= 5)
     rsi_ok = bool(rsi and rsi > 50)
@@ -439,12 +446,12 @@ def summarize_features(ticker: str, df: pd.DataFrame, fa: Dict, regime: int) -> 
 
     return {
         "ticker": ticker,
-        "price": round(close, 2),
-        "close": close,
-        "ma20": ma20,
-        "ma50": ma50,
-        "ma100": ma100,
-        "ma200": ma200,
+        "price": round(close_vnd, 0),
+        "close": close_vnd,
+        "ma20": ma20_vnd,
+        "ma50": ma50_vnd,
+        "ma100": ma100_vnd,
+        "ma200": ma200_vnd,
         "rsi": rsi,
         "adx": adx,
         "di_pos": di_pos,
