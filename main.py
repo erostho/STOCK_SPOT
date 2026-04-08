@@ -484,62 +484,141 @@ def score_penny(x: Dict) -> Optional[Dict]:
     price = x["price"]
     if not (price and price < PENNY_MAX_PRICE):
         return None
-    if x["value20"] < PENNY_LIQ_MIN:
+
+    value20 = x.get("value20") or 0
+    roe = x.get("roe")
+    eps = x.get("eps")
+    pe = x.get("pe")
+    de = x.get("de")
+    latest_np = x.get("latest_net_profit")
+    np_growth = x.get("np_growth")
+    dist_ma20 = x.get("dist_ma20")
+    close = x.get("close")
+    ma20 = x.get("ma20")
+    vol_ratio = x.get("vol_ratio") or 0
+
+    # 1) Thanh khoản: nới từ 3 tỷ xuống 2 tỷ
+    if value20 < 2e9:
         return None
-    if not ((x.get("eps") and x["eps"] > 0) or (x.get("latest_net_profit") and x["latest_net_profit"] > 0)):
+
+    # 2) ROE: nếu có thì chỉ cần >= 3
+    if roe is not None and roe < 3:
         return None
-    if x.get("roe") is not None and x["roe"] <= 5:
+
+    # 3) D/E: nếu có thì cho rộng hơn
+    if de is not None and de >= 3:
         return None
-    if x.get("de") is not None and x["de"] >= 2.0:
+
+    # 4) FA mềm hơn: chỉ cần 1 trong 3 điều kiện là được
+    fa_ok = False
+    if eps is not None and eps > 0:
+        fa_ok = True
+    if latest_np is not None and latest_np > 0:
+        fa_ok = True
+    if np_growth is not None and np_growth > 0:
+        fa_ok = True
+    if not fa_ok:
         return None
-    if not (x["close"] > (x.get("ma20") or 0) or ((x.get("dist_ma20") or 999) <= 8)):
+
+    # 5) Kỹ thuật: chỉ cần không quá xấu
+    tech_ok = False
+    if dist_ma20 is not None and dist_ma20 <= 12:
+        tech_ok = True
+    if close is not None and ma20 is not None and close >= ma20 * 0.95:
+        tech_ok = True
+    if not tech_ok:
         return None
-    if (x.get("dist_ma20") or 999) > 15:
+
+    # 6) Không lấy mã đã tăng quá xa nền ngắn hạn
+    if dist_ma20 is not None and dist_ma20 > 18:
         return None
 
     score = 0.0
     reasons = []
 
-    if x.get("eps") and x["eps"] > 0:
+    # EPS
+    if eps is not None and eps > 0:
         score += 1.0
-        reasons.append("EPS dương, nền tảng không quá xấu")
-    if x.get("roe") and x["roe"] > 8:
+        reasons.append(f"EPS dương ({eps:.0f}), nền lợi nhuận không quá yếu")
+
+    # ROE
+    if roe is not None:
+        if roe >= 8:
+            score += 1.2
+            reasons.append(f"ROE {roe:.1f}% ở mức khá trong nhóm cổ phiếu giá thấp")
+        elif roe >= 5:
+            score += 0.8
+            reasons.append(f"ROE {roe:.1f}% ở mức chấp nhận được")
+        elif roe >= 3:
+            score += 0.4
+
+    # PE
+    if pe is not None:
+        if 0 < pe < 12:
+            score += 1.0
+            reasons.append(f"PE {pe:.1f}, định giá chưa quá cao")
+        elif 0 < pe < 18:
+            score += 0.5
+
+    # Lợi nhuận / tăng trưởng
+    if latest_np is not None and latest_np > 0:
         score += 1.0
-        reasons.append("ROE ở mức chấp nhận được với nhóm giá thấp")
-    if x.get("np_growth") is not None and x["np_growth"] > 0:
-        score += 1.2
-        reasons.append("Lợi nhuận năm gần nhất đang cải thiện")
-    if x["trend_up_short"]:
-        score += 1.2
-        reasons.append("Giá đang giữ trên MA20/MA50 ngắn hạn")
-    if x["breakout20"]:
+        reasons.append("Lợi nhuận gần nhất vẫn duy trì dương")
+
+    if np_growth is not None:
+        if np_growth > 10:
+            score += 1.2
+            reasons.append("Lợi nhuận đang cải thiện khá rõ")
+        elif np_growth > 0:
+            score += 0.7
+            if len(reasons) < 3:
+                reasons.append("Lợi nhuận có dấu hiệu cải thiện")
+
+    # Thanh khoản
+    if value20 >= 5e9:
         score += 1.0
-        reasons.append("Vừa vượt vùng giá cao 20 phiên")
-    if x["stage2"]:
-        score += 1.0
-        reasons.append("Cấu trúc kỹ thuật đang dần tốt lên")
-    if x["vol_ratio"] and x["vol_ratio"] >= 1.2:
+        if len(reasons) < 3:
+            reasons.append("Thanh khoản khá tốt so với mặt bằng nhóm dưới 10.000đ")
+    elif value20 >= 3e9:
+        score += 0.7
+    else:
+        score += 0.4
+
+    # Vị trí giá / kỹ thuật chỉ là phụ
+    if dist_ma20 is not None:
+        if dist_ma20 <= 6:
+            score += 1.0
+            if len(reasons) < 3:
+                reasons.append("Giá đang ở gần vùng nền hỗ trợ, phù hợp theo dõi tích lũy")
+        elif dist_ma20 <= 12:
+            score += 0.5
+
+    if x.get("trend_up_short"):
         score += 0.8
-        reasons.append("Dòng tiền giao dịch cải thiện")
-    if x["value20"] >= 5e9:
-        score += 0.8
-    if x["regime"] > 0:
+    if x.get("breakout20"):
+        score += 0.6
+    if x.get("stage2"):
+        score += 0.5
+    if vol_ratio >= 1.2:
+        score += 0.6
+    if x.get("regime", 0) > 0:
         score += 0.5
 
     score = min(10.0, round(score, 1))
 
-    if x["breakout20"] and x["near_ma20_bonus"] >= 1:
-        label = "Tích lũy chờ breakout"
-        risk = "Phù hợp mua thăm dò, tránh mua đuổi nếu nến tăng mạnh bất thường."
-    elif x.get("np_growth") is not None and x["np_growth"] > 0:
+    # Label
+    if np_growth is not None and np_growth > 0:
         label = "Hồi phục đáng chú ý"
-        risk = "Nhóm dưới 10k biến động lớn, nên giải ngân nhỏ và chia lệnh."
+        risk = "Nhóm dưới 10.000đ biến động lớn, nên giải ngân nhỏ và chia lệnh."
+    elif x.get("breakout20") or (dist_ma20 is not None and dist_ma20 <= 6):
+        label = "Tích lũy chờ breakout"
+        risk = "Phù hợp mua thăm dò quanh vùng hỗ trợ, tránh mua đuổi khi tăng nóng."
     else:
         label = "Thăm dò sớm"
-        risk = "Chỉ nên xem là danh mục theo dõi ưu tiên, chưa phù hợp all-in."
+        risk = "Ưu tiên theo dõi và giải ngân nhỏ, không phù hợp dồn vốn mạnh."
 
-    buy_low = round(max(0, x["price"] * 0.97), 2)
-    buy_high = round(x["price"] * 1.02, 2)
+    buy_low = round(max(0, price * 0.97), 2)
+    buy_high = round(price * 1.03, 2)
 
     return {
         **x,
@@ -549,7 +628,6 @@ def score_penny(x: Dict) -> Optional[Dict]:
         "reasons": reasons[:3],
         "risk_note": risk,
     }
-
 
 
 def score_short_term(x: Dict) -> Optional[Dict]:
@@ -624,25 +702,47 @@ def score_short_term(x: Dict) -> Optional[Dict]:
         "risk_note": risk,
     }
 
-
-
 def score_long_term(x: Dict) -> Optional[Dict]:
     price = x["price"]
     if not (price and price < LONG_MAX_PRICE):
         return None
-    if x["value20"] < LONG_LIQ_MIN:
+
+    value20 = x.get("value20") or 0
+    roe = x.get("roe")
+    eps = x.get("eps")
+    pe = x.get("pe")
+    de = x.get("de")
+    latest_np = x.get("latest_net_profit")
+    np_growth = x.get("np_growth")
+    dist_ma50 = x.get("dist_ma50")
+    close = x.get("close")
+    ma50 = x.get("ma50")
+
+    # 1) Thanh khoản: nới từ 3 tỷ xuống 2 tỷ
+    if value20 < 2e9:
         return None
-    if not (x.get("eps") and x["eps"] > 0):
+
+    # 2) Chỉ giữ EPS dương là điều kiện cứng
+    if eps is None or eps <= 0:
         return None
-    if not (x.get("roe") and x["roe"] > 10):
+
+    # 3) Các chỉ số khác: nếu có thì mới lọc
+    if roe is not None and roe < 7:
         return None
-    if x.get("de") is not None and x["de"] >= 1.5:
+
+    if pe is not None and not (0 < pe < 22):
         return None
-    if x.get("pe") is not None and not (0 < x["pe"] < 18):
+
+    if de is not None and de >= 2:
         return None
-    if x.get("np_growth") is not None and x["np_growth"] <= 0:
-        return None
-    if not (x["close"] > (x.get("ma50") or 0) or ((x.get("dist_ma50") or 999) <= 8)):
+
+    # 4) Vị trí giá không quá xấu là được
+    tech_ok = False
+    if dist_ma50 is not None and dist_ma50 <= 12:
+        tech_ok = True
+    if close is not None and ma50 is not None and close >= ma50 * 0.93:
+        tech_ok = True
+    if not tech_ok:
         return None
 
     score = 0.0
@@ -650,48 +750,88 @@ def score_long_term(x: Dict) -> Optional[Dict]:
     investment_case = "Doanh nghiệp ổn định để tích lũy"
     holding_style = "Tích lũy 3-6 tháng hoặc dài hơn"
 
-    if x.get("roe") and x["roe"] >= 15:
-        score += 2.0
-        reasons.append("ROE khá tốt, chất lượng doanh nghiệp ổn")
+    # EPS
+    score += 1.0
+    reasons.append(f"EPS dương ({eps:.0f}), doanh nghiệp vẫn tạo ra lợi nhuận")
+
+    # ROE
+    if roe is not None:
+        if roe >= 15:
+            score += 1.5
+            reasons.append(f"ROE {roe:.1f}% ở mức tốt")
+        elif roe >= 10:
+            score += 1.0
+            reasons.append(f"ROE {roe:.1f}% ở mức khá")
+        elif roe >= 7:
+            score += 0.5
+
+    # PE
+    if pe is not None:
+        if 0 < pe <= 15:
+            score += 1.2
+            reasons.append(f"PE {pe:.1f}, định giá tương đối hợp lý")
+        elif pe < 22:
+            score += 0.6
+
+    # D/E
+    if de is not None:
+        if de < 1:
+            score += 1.0
+            reasons.append("Nợ/vốn chủ sở hữu ở mức an toàn")
+        elif de < 2:
+            score += 0.5
+
+    # Lợi nhuận / tăng trưởng
+    if latest_np is not None and latest_np > 0:
+        score += 1.0
+        if len(reasons) < 3:
+            reasons.append("Lợi nhuận gần nhất vẫn duy trì dương")
+
+    if np_growth is not None:
+        if np_growth > 10:
+            score += 1.2
+            investment_case = "Tăng trưởng + định giá hợp lý"
+            if len(reasons) < 3:
+                reasons.append("Tăng trưởng lợi nhuận đang tích cực")
+        elif np_growth > 0:
+            score += 0.7
+            if len(reasons) < 3:
+                reasons.append("Lợi nhuận vẫn giữ được tăng trưởng dương")
+
+    # Thanh khoản
+    if value20 >= 5e9:
+        score += 1.0
+    elif value20 >= 3e9:
+        score += 0.7
     else:
-        score += 1.2
-        reasons.append("ROE đạt ngưỡng chấp nhận được cho tích lũy dài hơn")
+        score += 0.4
 
-    if x.get("np_growth") is not None and x["np_growth"] > 10:
-        score += 2.0
-        reasons.append("Lợi nhuận đang tăng trưởng tốt")
-        investment_case = "Tăng trưởng + định giá hợp lý"
-    elif x.get("np_growth") is not None and x["np_growth"] > 0:
-        score += 1.2
-        reasons.append("Lợi nhuận vẫn giữ được tăng trưởng dương")
+    # Vị trí tích lũy
+    if dist_ma50 is not None:
+        if dist_ma50 <= 6:
+            score += 1.0
+            if len(reasons) < 3:
+                reasons.append("Giá đang ở vùng tích lũy tương đối thuận lợi")
+        elif dist_ma50 <= 12:
+            score += 0.5
 
-    if x.get("pe") and 0 < x["pe"] < 14:
-        score += 1.5
-        reasons.append("Định giá chưa ở mức quá cao")
-    elif x.get("pe") and x["pe"] < 18:
+    # Kỹ thuật phụ
+    if x.get("trend_up_mid"):
         score += 0.8
-
-    if x.get("de") is not None and x["de"] < 1.0:
-        score += 1.0
-    if x["trend_up_mid"]:
-        score += 1.0
-    if x["stage2"]:
-        score += 1.0
-        reasons.append("Kỹ thuật trung hạn đang ủng hộ tích lũy")
-    if (x.get("dist_ma50") or 999) <= 5:
-        score += 0.8
-    if x["regime"] > 0:
+    if x.get("stage2"):
+        score += 0.6
+    if x.get("regime", 0) > 0:
         score += 0.5
 
     score = min(10.0, round(score, 1))
 
-    if x["breakout20"] and (x.get("dist_ma50") or 999) > 8:
+    if x.get("breakout20") and (dist_ma50 is not None and dist_ma50 > 8):
         holding_style = "Doanh nghiệp tốt nhưng nên chờ nhịp điều chỉnh bớt nóng"
-        risk = "FA ổn nhưng điểm mua hiện tại không còn quá đẹp nếu giá đã kéo xa hỗ trợ."
+        risk = "FA ổn nhưng điểm mua hiện tại chưa thật sự đẹp nếu giá đã kéo xa hỗ trợ."
     else:
-        risk = "Phù hợp tích lũy từng phần, ưu tiên mua gần MA50 hoặc các nhịp điều chỉnh lành mạnh."
+        risk = "Phù hợp tích lũy từng phần, ưu tiên mua gần vùng hỗ trợ trung hạn."
 
-    anchor = x["ma50"] if x.get("ma50") else x["price"]
+    anchor = ma50 if ma50 else price
     buy_low = round(anchor * 0.97, 2)
     buy_high = round(anchor * 1.03, 2)
 
@@ -704,8 +844,6 @@ def score_long_term(x: Dict) -> Optional[Dict]:
         "reasons": reasons[:3],
         "risk_note": risk,
     }
-
-
 # ============================================================
 # FORMATTER
 # ============================================================
@@ -724,20 +862,40 @@ def format_weekly_message(penny: List[Dict], short: List[Dict], long_: List[Dict
     week_start = today.strftime("%d/%m/%Y")
     week_end = (today + timedelta(days=6)).strftime("%d/%m/%Y")
 
+    def pick_reason(x: Dict, idx: int, fallback: str) -> str:
+        reasons = x.get("reasons", [])
+        if isinstance(reasons, list) and len(reasons) > idx and reasons[idx]:
+            return reasons[idx]
+        return fallback
+
     def render_penny(items: List[Dict]) -> str:
         if not items:
             return "Không có mã phù hợp tuần này."
+
         lines = []
         for i, x in enumerate(items, 1):
+            r1 = pick_reason(
+                x, 0,
+                "EPS và lợi nhuận đang ở mức chấp nhận được trong nhóm cổ phiếu giá thấp"
+            )
+            r2 = pick_reason(
+                x, 1,
+                "Định giá và hiệu quả sử dụng vốn không quá xấu so với mặt bằng cùng nhóm"
+            )
+            r3 = pick_reason(
+                x, 2,
+                "Giá đang ở vùng có thể theo dõi tích lũy, phù hợp giải ngân nhỏ từng phần"
+            )
+
             lines.extend([
                 f"{i}. {x['ticker']} — Giá: {_fmt_num(x['price'])} — Điểm: {_fmt_num(x['score'], 1)}/10",
-                f"   🎯 Nhóm: {x['label']}",
+                f"   🎯 Nhóm: {x.get('label', 'Theo dõi')}",
                 f"   ✅ Lý do:",
-                f"   - {x['reasons'][0] if len(x['reasons']) > 0 else 'Thanh khoản và cấu trúc đang ở mức chấp nhận được'}",
-                f"   - {x['reasons'][1] if len(x['reasons']) > 1 else 'Giá đang ở vùng có thể theo dõi để tích lũy'}",
-                f"   - {x['reasons'][2] if len(x['reasons']) > 2 else 'Phù hợp kiểu giải ngân nhỏ, ưu tiên kiểm soát rủi ro'}",
-                f"   💵 Vùng mua tham khảo: {x['buy_zone']}",
-                f"   ⚠️ Lưu ý: {x['risk_note']}",
+                f"   - {r1}",
+                f"   - {r2}",
+                f"   - {r3}",
+                f"   💵 Vùng mua tham khảo: {x.get('buy_zone', 'Theo dõi thêm')}",
+                f"   ⚠️ Lưu ý: {x.get('risk_note', 'Nhóm dưới 10.000đ biến động lớn, nên ưu tiên tỷ trọng nhỏ.')}",
                 ""
             ])
         return "\n".join(lines).strip()
@@ -745,18 +903,32 @@ def format_weekly_message(penny: List[Dict], short: List[Dict], long_: List[Dict
     def render_short(items: List[Dict]) -> str:
         if not items:
             return "Không có mã phù hợp tuần này."
+
         lines = []
         for i, x in enumerate(items, 1):
+            r1 = pick_reason(
+                x, 0,
+                "Doanh nghiệp có nền hoạt động ổn và dòng tiền ngắn hạn đang quay lại"
+            )
+            r2 = pick_reason(
+                x, 1,
+                "Thanh khoản hiện tại đủ tốt để ưu tiên theo dõi trong danh mục ngắn hạn"
+            )
+            r3 = pick_reason(
+                x, 2,
+                "Vị trí giá chưa quá đuổi, phù hợp canh mua theo nhịp điều chỉnh"
+            )
+
             lines.extend([
                 f"{i}. {x['ticker']} — Giá: {_fmt_num(x['price'])} — Điểm: {_fmt_num(x['score'], 1)}/10",
-                f"   🚀 Setup: {x['setup_type']}",
+                f"   🚀 Setup: {x.get('setup_type', 'Theo dõi ngắn hạn')}",
                 f"   ✅ Lý do:",
-                f"   - {x['reasons'][0] if len(x['reasons']) > 0 else 'Xu hướng ngắn hạn đang tích cực'}",
-                f"   - {x['reasons'][1] if len(x['reasons']) > 1 else 'Dòng tiền chưa rút mạnh'}",
-                f"   - {x['reasons'][2] if len(x['reasons']) > 2 else 'Điểm mua hiện tại chưa quá xa hỗ trợ gần'}",
-                f"   💵 Vùng mua đẹp: {x['buy_zone']}",
-                f"   🎯 Kịch bản: {x['entry_plan']}",
-                f"   ⚠️ Hạn chế: {x['risk_note']}",
+                f"   - {r1}",
+                f"   - {r2}",
+                f"   - {r3}",
+                f"   💵 Vùng mua đẹp: {x.get('buy_zone', 'Theo dõi thêm')}",
+                f"   🎯 Kịch bản: {x.get('entry_plan', 'Ưu tiên mua từng phần khi giá giữ được vùng hỗ trợ gần.')}",
+                f"   ⚠️ Hạn chế: {x.get('risk_note', 'Danh mục ngắn hạn cần theo dõi phản ứng giá trong tuần.')}",
                 ""
             ])
         return "\n".join(lines).strip()
@@ -764,18 +936,32 @@ def format_weekly_message(penny: List[Dict], short: List[Dict], long_: List[Dict
     def render_long(items: List[Dict]) -> str:
         if not items:
             return "Không có mã phù hợp tuần này."
+
         lines = []
         for i, x in enumerate(items, 1):
+            r1 = pick_reason(
+                x, 0,
+                "EPS dương, cho thấy doanh nghiệp vẫn đang tạo ra lợi nhuận"
+            )
+            r2 = pick_reason(
+                x, 1,
+                "ROE và định giá đang ở mức tương đối phù hợp để theo dõi tích lũy"
+            )
+            r3 = pick_reason(
+                x, 2,
+                "Lợi nhuận và vị trí giá hiện tại đủ ổn để cân nhắc cho góc nhìn dài hơn"
+            )
+
             lines.extend([
                 f"{i}. {x['ticker']} — Giá: {_fmt_num(x['price'])} — Điểm: {_fmt_num(x['score'], 1)}/10",
-                f"   🏦 Luận điểm đầu tư: {x['investment_case']}",
+                f"   🏦 Luận điểm đầu tư: {x.get('investment_case', 'Tích lũy dài hạn')}",
                 f"   ✅ Điểm mạnh:",
-                f"   - {x['reasons'][0] if len(x['reasons']) > 0 else 'Nền tảng doanh nghiệp ở mức chấp nhận được'}",
-                f"   - {x['reasons'][1] if len(x['reasons']) > 1 else 'Định giá chưa quá căng'}",
-                f"   - {x['reasons'][2] if len(x['reasons']) > 2 else 'Vị trí kỹ thuật đủ ổn để tích lũy'}",
-                f"   💵 Vùng tích lũy: {x['buy_zone']}",
-                f"   🕒 Phù hợp: {x['holding_style']}",
-                f"   ⚠️ Theo dõi thêm: {x['risk_note']}",
+                f"   - {r1}",
+                f"   - {r2}",
+                f"   - {r3}",
+                f"   💵 Vùng tích lũy: {x.get('buy_zone', 'Theo dõi thêm')}",
+                f"   🕒 Phù hợp: {x.get('holding_style', 'Tích lũy từng phần trong trung hạn đến dài hạn')}",
+                f"   ⚠️ Theo dõi thêm: {x.get('risk_note', 'Cần tiếp tục theo dõi thêm kết quả kinh doanh và phản ứng giá.')}",
                 ""
             ])
         return "\n".join(lines).strip()
@@ -809,8 +995,7 @@ def format_weekly_message(penny: List[Dict], short: List[Dict], long_: List[Dict
 - Danh mục ngắn hạn ưu tiên timing.
 - Danh mục dài hạn ưu tiên tích lũy từng phần.
 """
-    return msg.strip()
-
+    return msg
 
 # ============================================================
 # TELEGRAM
