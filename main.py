@@ -1058,12 +1058,12 @@ def format_weekly_message(penny: List[Dict], short: List[Dict], long_: List[Dict
 {render_penny(penny)}
 
 ━━━━━━━━━━━━━━━━━━
-2️⃣ DANH MỤC ƯU TIÊN MUA NGẮN HẠN (<50k)
+2️⃣ DANH MỤC ƯU TIÊN MUA NGẮN HẠN (<100k)
 ━━━━━━━━━━━━━━━━━━
 {render_short(short)}
 
 ━━━━━━━━━━━━━━━━━━
-3️⃣ DANH MỤC ƯU TIÊN MUA DÀI HẠN (<50k)
+3️⃣ DANH MỤC ƯU TIÊN MUA DÀI HẠN (<100k)
 ━━━━━━━━━━━━━━━━━━
 {render_long(long_)}
 
