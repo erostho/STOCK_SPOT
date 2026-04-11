@@ -46,9 +46,9 @@ PRICE_TTL_SEC = 24 * 3600
 FA_TTL_SEC = 7 * 24 * 3600
 UNIVERSE_TTL_SEC = 24 * 3600
 
-PENNY_MAX_PRICE = 10_000
-SHORT_MAX_PRICE = 50_000
-LONG_MAX_PRICE = 50_000
+PENNY_MAX_PRICE = 15_000
+SHORT_MAX_PRICE = 100_000
+LONG_MAX_PRICE = 100_000
 
 PENNY_LIQ_MIN = 3e9
 SHORT_LIQ_MIN = 7e9
@@ -571,7 +571,7 @@ def score_penny(x: Dict) -> Optional[Dict]:
     if value20 >= 4e9:
         score += 1.0
         if len(reasons) < 3:
-            reasons.append("Thanh khoản khá tốt so với mặt bằng nhóm dưới 10.000đ")
+            reasons.append("Thanh khoản khá tốt so với mặt bằng nhóm dưới 15.000đ")
     elif value20 >= 2e9:
         score += 0.7
     else:
@@ -602,7 +602,7 @@ def score_penny(x: Dict) -> Optional[Dict]:
 
     if np_growth is not None and np_growth > 0:
         label = "Hồi phục đáng chú ý"
-        risk = "Nhóm dưới 10.000đ biến động lớn, nên giải ngân nhỏ và chia lệnh."
+        risk = "Nhóm dưới 15.000đ biến động lớn, nên giải ngân nhỏ và chia lệnh."
     elif x.get("breakout20") or (dist_ma20 is not None and dist_ma20 <= 6):
         label = "Tích lũy chờ breakout"
         risk = "Phù hợp mua thăm dò quanh vùng hỗ trợ, tránh mua đuổi khi tăng nóng."
@@ -976,7 +976,7 @@ def format_weekly_message(penny: List[Dict], short: List[Dict], long_: List[Dict
                 f"   - {r2}",
                 f"   - {r3}",
                 f"   💵 Vùng mua tham khảo: {x.get('buy_zone', 'Theo dõi thêm')}",
-                f"   ⚠️ Lưu ý: {x.get('risk_note', 'Nhóm dưới 10.000đ biến động lớn, nên ưu tiên tỷ trọng nhỏ.')}",
+                f"   ⚠️ Lưu ý: {x.get('risk_note', 'Nhóm dưới 15.000đ biến động lớn, nên ưu tiên tỷ trọng nhỏ.')}",
                 ""
             ])
         return "\n".join(lines).strip()
@@ -1053,7 +1053,7 @@ def format_weekly_message(penny: List[Dict], short: List[Dict], long_: List[Dict
 🔥 Tâm lý thị trường: {market_comment}
 
 ━━━━━━━━━━━━━━━━━━
-1️⃣ DANH MỤC CP <10.000đ TIỀM NĂNG
+1️⃣ DANH MỤC CP <15.000đ TIỀM NĂNG
 ━━━━━━━━━━━━━━━━━━
 {render_penny(penny)}
 
