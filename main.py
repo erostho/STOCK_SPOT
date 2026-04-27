@@ -386,6 +386,7 @@ def get_fa_data_external(ticker: str) -> Dict:
 
     result["fa_error"] = last_error
     return result
+    
 def get_fa_data_vnstock_data(ticker: str) -> Dict:
     result = {
         "ticker": ticker,
@@ -464,81 +465,106 @@ def get_fa_data_vnstock_data(ticker: str) -> Dict:
     except Exception as e:
         result["fa_error"] = str(e)
         return result
-        
+def get_fa_data_vietstock_external(ticker: str) -> Dict:
+    result = {
+        "ticker": ticker,
+        "eps": None,
+        "roe": None,
+        "pe": None,
+        "pb": None,
+        "de": None,
+        "rev_growth": None,
+        "np_growth": None,
+        "latest_net_profit": None,
+        "fa_quality_score": 0,
+        "fa_ok": False,
+        "fa_source": "VIETSTOCK_SCRAPE",
+        "fa_error": None,
+    }
+
+    urls = [
+        f"https://finance.vietstock.vn/{ticker}/tai-chinh.htm",
+        f"https://finance.vietstock.vn/{ticker}/phan-tich-ky-thuat.htm",
+    ]
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
+    }
+
+    last_error = None
+
+    for url in urls:
+        try:
+            rate_limit_wait()
+            r = requests.get(url, headers=headers, timeout=20)
+
+            if r.status_code != 200:
+                last_error = f"{url} status={r.status_code}"
+                continue
+
+            soup = BeautifulSoup(r.text, "html.parser")
+            text = soup.get_text(" ", strip=True)
+            text = re.sub(r"\s+", " ", text)
+
+            result["eps"] = _extract_metric_from_text(text, ["EPS", "EPS pha loãng"])
+            result["roe"] = _extract_metric_from_text(text, ["ROE"])
+            result["pe"] = _extract_metric_from_text(text, ["P/E", "PE"])
+            result["pb"] = _extract_metric_from_text(text, ["P/B", "PB"])
+            result["de"] = _extract_metric_from_text(text, ["D/E", "Nợ/VCSH", "Nợ/Vốn chủ sở hữu"])
+
+            result["fa_ok"] = any([
+                result["eps"] is not None,
+                result["roe"] is not None,
+                result["pe"] is not None,
+                result["pb"] is not None,
+            ])
+
+            score = 0
+            if result["eps"] is not None and result["eps"] > 0:
+                score += 1
+            if result["roe"] is not None and result["roe"] >= 10:
+                score += 1
+            if result["pe"] is not None and 0 < result["pe"] < 18:
+                score += 1
+            if result["de"] is not None and result["de"] < 1.5:
+                score += 1
+
+            result["fa_quality_score"] = score
+
+            if result["fa_ok"]:
+                return result
+
+            last_error = f"{url} không tìm thấy metric FA trong HTML"
+
+        except Exception as e:
+            last_error = str(e)
+
+    result["fa_error"] = last_error
+    return result
+    
 def get_fa_data(ticker: str) -> Dict:
     cache_all = cache_load(FA_CACHE_FILE, EXTERNAL_FA_TTL_SEC) or {}
     if ticker in cache_all:
         return cache_all[ticker]
 
-    # 1) Ưu tiên FA ngoài vnstock
-    fa = get_fa_data_external(ticker)
+    sources = [
+        get_fa_data_vietstock_external,
+        get_fa_data_external,  # FireAnt cũ, giữ làm backup
+    ]
 
-    if fa.get("fa_ok"):
-        log(f"✅ FA {ticker}: lấy được từ {fa.get('fa_source')}")
-        cache_all[ticker] = fa
-        cache_save(FA_CACHE_FILE, cache_all)
-        return fa
-
-    # 2) Nếu FireAnt chưa lấy được, thử VCI vnstock như backup
-    try:
-        stock = Vnstock().stock(symbol=ticker, source="VCI")
-        finance = stock.finance
-
-        result = {
-            "ticker": ticker,
-            "eps": None,
-            "roe": None,
-            "pe": None,
-            "pb": None,
-            "de": None,
-            "rev_growth": None,
-            "np_growth": None,
-            "latest_net_profit": None,
-            "fa_quality_score": 0,
-            "fa_ok": False,
-            "fa_source": "VCI_BACKUP",
-            "fa_error": None,
-        }
-
-        ratio_df = _vns_call(finance.ratio, period="year", lang="vi", dropna=True, retries=0)
-
-        if ratio_df is not None and not ratio_df.empty:
-            row = ratio_df.iloc[-1]
-            result["eps"] = _safe_float(row.get(_find_col(ratio_df, ["eps"])))
-            result["roe"] = _safe_float(row.get(_find_col(ratio_df, ["roe"])))
-            result["pe"] = _safe_float(row.get(_find_col(ratio_df, ["p/e", "pe"])))
-            result["pb"] = _safe_float(row.get(_find_col(ratio_df, ["p/b", "pb"])))
-            result["de"] = _safe_float(row.get(_find_col(ratio_df, ["nợ/vốn", "debttoequity", "debt/equity", "d/e"])))
-
-        result["fa_ok"] = any([
-            result["eps"] is not None,
-            result["roe"] is not None,
-            result["pe"] is not None,
-            result["pb"] is not None,
-        ])
-
-        score = 0
-        if result["eps"] is not None and result["eps"] > 0:
-            score += 1
-        if result["roe"] is not None and result["roe"] >= 10:
-            score += 1
-        if result["pe"] is not None and 0 < result["pe"] < 18:
-            score += 1
-        if result["de"] is not None and result["de"] < 1.5:
-            score += 1
-
-        result["fa_quality_score"] = score
-
-        if result["fa_ok"]:
-            log(f"✅ FA {ticker}: lấy được từ VCI_BACKUP")
-            cache_all[ticker] = result
+    for fn in sources:
+        fa = fn(ticker)
+        if fa.get("fa_ok"):
+            log(f"✅ FA {ticker}: lấy được từ {fa.get('fa_source')}")
+            cache_all[ticker] = fa
             cache_save(FA_CACHE_FILE, cache_all)
-            return result
+            return fa
+        else:
+            log(f"⚠️ FA {ticker}: {fa.get('fa_source')} lỗi/rỗng: {fa.get('fa_error')}")
 
-    except Exception as e:
-        pass
-
-    log(f"⚠️ FA {ticker}: external/vnstock đều chưa lấy được | {fa.get('fa_error')}")
+    log(f"⚠️ FA {ticker}: tất cả external source đều chưa lấy được")
     return fa
 
 def get_market_regime() -> Tuple[int, str, str]:
