@@ -58,6 +58,8 @@ LONG_LIQ_MIN = 3e9
 BATCH_SIZE = int(os.getenv("STOCK_SCAN_BATCH_SIZE", "510"))
 BATCH_DELAY_SEC = int(os.getenv("STOCK_SCAN_BATCH_DELAY_SEC", "90"))
 
+
+
 def log(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -200,7 +202,29 @@ def _vns_call(fn, *args, retries: int = 2, **kwargs):
                 time.sleep(sleep_s)
     raise last_error
 
+def _finance_call_flexible(fn):
+    """
+    Gọi finance API theo nhiều kiểu vì mỗi source VCI/KBS nhận tham số khác nhau.
+    Giữ nguyên FA, nhưng tránh lỗi lang/dropna/period.
+    """
+    variants = [
+        {"period": "year", "lang": "vi", "dropna": True},
+        {"period": "year", "dropna": True},
+        {"period": "year"},
+        {},
+    ]
 
+    last_error = None
+
+    for kwargs in variants:
+        try:
+            return _vns_call(fn, retries=0, **kwargs)
+        except Exception as e:
+            last_error = e
+            continue
+
+    raise last_error
+    
 def get_price_history(ticker: str, length: int = PRICE_HISTORY_BARS) -> pd.DataFrame:
     cache_all = cache_load(PRICE_CACHE_FILE, PRICE_TTL_SEC) or {}
     if ticker in cache_all:
@@ -293,7 +317,7 @@ def get_fa_data(ticker: str) -> Dict:
         finance = stock.finance
 
         # ---------- RATIO ----------
-        ratio_df = _vns_call(finance.ratio, period="year", lang="vi", dropna=True)
+        ratio_df = _finance_call_flexible(finance.ratio)
 
         if ratio_df is not None and not ratio_df.empty:
             row = ratio_df.iloc[-1]
@@ -316,7 +340,7 @@ def get_fa_data(ticker: str) -> Dict:
                 result["de"] = _safe_float(row.get(de_col))
 
         # ---------- INCOME ----------
-        income_df = _vns_call(finance.income_statement, period="year", dropna=True)
+        income_df = _finance_call_flexible(finance.income_statement)
 
         if income_df is not None and not income_df.empty:
             income_df = income_df.tail(4).copy()
@@ -360,12 +384,10 @@ def get_fa_data(ticker: str) -> Dict:
 
         return result
 
-    # ========================================================
-    # FALLBACK FLOW: VCI -> TCBS -> FA None
-    # ========================================================
     errors = []
 
-    for source in ["VCI", "KBS", "FMP"]:
+    # CHỈ dùng source thực tế còn khả dụng trên Render
+    for source in ["VCI", "KBS"]:
         try:
             fa = read_fa_from_source(source)
 
@@ -382,15 +404,16 @@ def get_fa_data(ticker: str) -> Dict:
             errors.append(f"{source}: {err}")
 
             if err == "data" or "'data'" in err:
-                log(f"⚠️ FA {ticker}: {source} lỗi thiếu key 'data' -> thử nguồn khác")
+                log(f"⚠️ FA {ticker}: {source} lỗi thiếu key 'data'")
+            elif "404" in err:
+                log(f"⚠️ FA {ticker}: {source} không có endpoint FA / 404")
             else:
-                log(f"⚠️ FA {ticker}: {source} lỗi {err} -> thử nguồn khác")
+                log(f"⚠️ FA {ticker}: {source} lỗi {err}")
 
             continue
 
-    # Nếu cả VCI/KBS/FMP đều fail
     final_error = " | ".join(errors)
-    log(f"⚠️ FA {ticker}: cả VCI/KBS/FMP đều lỗi hoặc rỗng -> dùng FA rỗng | {final_error}")
+    log(f"⚠️ FA {ticker}: không lấy được FA từ VCI/KBS -> dùng FA rỗng | {final_error}")
 
     return empty_fa(source_used=None, error=final_error)
 
