@@ -36,7 +36,7 @@ FA_CACHE_FILE = os.path.join(CACHE_DIR, "fa_cache_v2.json")
 UNIVERSE_CACHE_FILE = os.path.join(CACHE_DIR, "universe_cache.json")
 
 # ---------- throttling ----------
-RATE_LIMIT_PER_MIN = int(os.getenv("VNSTOCK_RATE_LIMIT_PER_MIN", "55"))  # giữ đệm dưới 60
+RATE_LIMIT_PER_MIN = int(os.getenv("VNSTOCK_RATE_LIMIT_PER_MIN", "45"))  # giữ đệm dưới 60
 REQUEST_TIMESTAMPS = deque()
 
 # ---------- user knobs ----------
@@ -54,6 +54,9 @@ PENNY_LIQ_MIN = 3e9
 SHORT_LIQ_MIN = 7e9
 LONG_LIQ_MIN = 3e9
 
+# ---------- batch scan ----------
+BATCH_SIZE = int(os.getenv("STOCK_SCAN_BATCH_SIZE", "510"))
+BATCH_DELAY_SEC = int(os.getenv("STOCK_SCAN_BATCH_DELAY_SEC", "90"))
 
 def log(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -1270,18 +1273,40 @@ def send_telegram(text: str):
 
 def build_universe_features(tickers: List[str], regime: int) -> List[Dict]:
     rows = []
-    for i, tk in enumerate(tickers, 1):
-        log(f"🔎 {i}/{len(tickers)} - {tk}")
-        try:
-            df = get_price_history(tk, length=PRICE_HISTORY_BARS)
-            if df is None or df.empty or len(df) < 120:
-                continue
-            fa = get_fa_data(tk)
-            row = summarize_features(tk, df, fa, regime)
-            if row:
-                rows.append(row)
-        except Exception as e:
-            log(f"⚠️ lỗi xử lý {tk}: {e}")
+    total = len(tickers)
+
+    for batch_start in range(0, total, BATCH_SIZE):
+        batch = tickers[batch_start: batch_start + BATCH_SIZE]
+        batch_no = batch_start // BATCH_SIZE + 1
+        total_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+
+        log(f"📦 BATCH {batch_no}/{total_batches} | {len(batch)} mã | vị trí {batch_start + 1}-{batch_start + len(batch)}")
+
+        for j, tk in enumerate(batch, 1):
+            global_i = batch_start + j
+            log(f"🔎 {global_i}/{total} - {tk}")
+
+            try:
+                df = get_price_history(tk, length=PRICE_HISTORY_BARS)
+                if df is None or df.empty or len(df) < 120:
+                    continue
+
+                fa = get_fa_data(tk)
+                row = summarize_features(tk, df, fa, regime)
+
+                if row:
+                    rows.append(row)
+
+            except Exception as e:
+                log(f"⚠️ lỗi xử lý {tk}: {e}")
+
+        log(f"✅ Xong batch {batch_no}/{total_batches} | usable hiện tại: {len(rows)} mã")
+
+        # Nghỉ giữa batch, trừ batch cuối
+        if batch_start + BATCH_SIZE < total:
+            log(f"😴 Nghỉ {BATCH_DELAY_SEC}s trước batch tiếp theo để tránh nghẽn API...")
+            time.sleep(BATCH_DELAY_SEC)
+
     log(f"✅ Build feature xong: {len(rows)} mã usable")
     return rows
 
