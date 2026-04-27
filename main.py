@@ -379,7 +379,7 @@ def get_fa_data(ticker: str) -> Dict:
     # ========================================================
     errors = []
 
-    for source in ["VCI", "TCBS"]:
+    for source in ["VCI", "MSN", "FMP"]:
         try:
             fa = read_fa_from_source(source)
 
@@ -402,9 +402,9 @@ def get_fa_data(ticker: str) -> Dict:
 
             continue
 
-    # Nếu cả VCI và TCBS đều fail
+    # Nếu cả VCI/MSN/FMP đều fail
     final_error = " | ".join(errors)
-    log(f"⚠️ FA {ticker}: cả VCI/TCBS đều lỗi hoặc rỗng -> dùng FA rỗng | {final_error}")
+    log(f"⚠️ FA {ticker}: cả VCI/MSN/FMP đều lỗi hoặc rỗng -> dùng FA rỗng | {final_error}")
 
     return empty_fa(source_used=None, error=final_error)
 
