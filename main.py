@@ -57,7 +57,21 @@ LONG_LIQ_MIN = 3e9
 # ---------- batch scan ----------
 BATCH_SIZE = int(os.getenv("STOCK_SCAN_BATCH_SIZE", "510"))
 BATCH_DELAY_SEC = int(os.getenv("STOCK_SCAN_BATCH_DELAY_SEC", "90"))
+DEBUG_FA = os.getenv("DEBUG_FA", "0").strip() == "1"
+DEBUG_SCORE = os.getenv("DEBUG_SCORE", "0").strip() == "1"
+DEBUG_TICKERS = set(
+    x.strip().upper()
+    for x in os.getenv("DEBUG_TICKERS", "").split(",")
+    if x.strip()
+)
 
+def should_debug_ticker(ticker: str) -> bool:
+    ticker = str(ticker).upper().strip()
+    return DEBUG_FA or DEBUG_SCORE or ticker in DEBUG_TICKERS
+
+def debug_log(ticker: str, msg: str):
+    if should_debug_ticker(ticker):
+        log(f"🧪 DEBUG {ticker}: {msg}")
 def log(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -292,8 +306,12 @@ def get_fa_data(ticker: str) -> Dict:
         try:
             ratio_df = _vns_call(finance.ratio, period="year", lang="vi", dropna=True)
         except Exception as e:
+            err = str(e)
+            if "'data'" in err:
+                log(f"❌ FA ratio lỗi {ticker}: thiếu 'data' | raw error: {err}")
+            else:
+                log(f"⚠️ FA ratio lỗi {ticker}: {err}")
             ratio_df = None
-            result["fa_error"] = f"ratio: {e}"
 
         if ratio_df is not None and not ratio_df.empty:
             row = ratio_df.iloc[-1]
@@ -319,9 +337,12 @@ def get_fa_data(ticker: str) -> Dict:
         try:
             income_df = _vns_call(finance.income_statement, period="year", dropna=True)
         except Exception as e:
+            err = str(e)
+            if "'data'" in err:
+                log(f"❌ FA income lỗi {ticker}: thiếu 'data' | raw error: {err}")
+            else:
+                log(f"⚠️ FA income lỗi {ticker}: {err}")
             income_df = None
-            old_err = result.get("fa_error")
-            result["fa_error"] = f"{old_err}; income: {e}" if old_err else f"income: {e}"
 
         if income_df is not None and not income_df.empty:
             income_df = income_df.tail(4).copy()
