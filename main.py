@@ -386,15 +386,24 @@ def get_fa_data(ticker: str) -> Dict:
         ])
 
     except Exception as e:
-        result["fa_error"] = str(e)
+        err = str(e)
+        result["fa_error"] = err
+    
+        if "'data'" in err or err == "data":
+            log(f"❌ FA lỗi {ticker}: thiếu key 'data' ngay khi gọi finance API | raw error={err}")
+        else:
+            log(f"❌ FA lỗi {ticker}: {err}")
 
     # Chỉ cache nếu có dữ liệu FA thật
     if result["fa_ok"]:
         cache_all[ticker] = result
         cache_save(FA_CACHE_FILE, cache_all)
     else:
-        # Không spam từng mã nữa, chỉ log nhẹ
-        log(f"⚠️ FA thiếu dữ liệu {ticker}: {result.get('fa_error')}")
+        err = str(result.get("fa_error") or "")
+        if "'data'" in err or err == "data":
+            log(f"⚠️ FA thiếu dữ liệu {ticker}: lỗi key 'data' từ vnstock/API")
+        else:
+            log(f"⚠️ FA thiếu dữ liệu {ticker}: {err}")
 
     return result
 
