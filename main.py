@@ -292,8 +292,12 @@ def _extract_metric_from_text(text: str, labels: List[str]):
     clean = re.sub(r"\s+", " ", text)
 
     for label in labels:
-        # Ví dụ: "EPS 2,345", "P/E 8.5", "ROE 15.2%"
-        pattern = rf"{re.escape(label)}\s*[:\-]?\s*([\-]?\d+[\d\.,]*\s*%?)"
+        # Bắt được dạng:
+        # P/E · 26.59
+        # EPS. 211
+        # ROE 15.2%
+        # P/B: 1.3
+        pattern = rf"{re.escape(label)}\s*[\.:·\-–—]?\s*([\-]?\d+[\d\.,]*\s*%?)"
         m = re.search(pattern, clean, flags=re.IGNORECASE)
         if m:
             return _parse_vn_number(m.group(1))
@@ -325,7 +329,6 @@ def get_fa_data_external(ticker: str) -> Dict:
 
     urls = [
         f"https://fireant.vn/ma-chung-khoan/{ticker}",
-        f"https://www.fireant.vn/Home/StockDetail/{ticker}",
     ]
 
     headers = {
@@ -349,8 +352,8 @@ def get_fa_data_external(ticker: str) -> Dict:
 
             result["eps"] = _extract_metric_from_text(text, ["EPS"])
             result["roe"] = _extract_metric_from_text(text, ["ROE"])
-            result["pe"] = _extract_metric_from_text(text, ["P/E", "PE"])
-            result["pb"] = _extract_metric_from_text(text, ["P/B", "PB"])
+            result["pe"] = _extract_metric_from_text(text, ["P/E"])
+            result["pb"] = _extract_metric_from_text(text, ["P/B"])
             result["de"] = _extract_metric_from_text(text, ["D/E", "Nợ/VCSH", "Nợ/Vốn"])
 
             result["fa_ok"] = any([
