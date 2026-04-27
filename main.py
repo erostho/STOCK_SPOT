@@ -283,35 +283,31 @@ def get_fa_data(ticker: str) -> Dict:
     if ticker in cache_all:
         return cache_all[ticker]
 
-    result = {
-        "ticker": ticker,
-        "eps": None,
-        "roe": None,
-        "pe": None,
-        "pb": None,
-        "de": None,
-        "rev_growth": None,
-        "np_growth": None,
-        "latest_net_profit": None,
-        "fa_quality_score": 0,
-        "fa_ok": False,
-        "fa_error": None,
-    }
+    def empty_fa(source_used=None, error=None) -> Dict:
+        return {
+            "ticker": ticker,
+            "eps": None,
+            "roe": None,
+            "pe": None,
+            "pb": None,
+            "de": None,
+            "rev_growth": None,
+            "np_growth": None,
+            "latest_net_profit": None,
+            "fa_quality_score": 0,
+            "fa_ok": False,
+            "fa_source": source_used,
+            "fa_error": error,
+        }
 
-    try:
-        stock = Vnstock().stock(symbol=ticker, source="VCI")
+    def read_fa_from_source(source: str) -> Dict:
+        result = empty_fa(source_used=source, error=None)
+
+        stock = Vnstock().stock(symbol=ticker, source=source)
         finance = stock.finance
 
         # ---------- RATIO ----------
-        try:
-            ratio_df = _vns_call(finance.ratio, period="year", lang="vi", dropna=True)
-        except Exception as e:
-            err = str(e)
-            if "'data'" in err:
-                log(f"❌ FA ratio lỗi {ticker}: thiếu 'data' | raw error: {err}")
-            else:
-                log(f"⚠️ FA ratio lỗi {ticker}: {err}")
-            ratio_df = None
+        ratio_df = _vns_call(finance.ratio, period="year", lang="vi", dropna=True)
 
         if ratio_df is not None and not ratio_df.empty:
             row = ratio_df.iloc[-1]
@@ -334,15 +330,7 @@ def get_fa_data(ticker: str) -> Dict:
                 result["de"] = _safe_float(row.get(de_col))
 
         # ---------- INCOME ----------
-        try:
-            income_df = _vns_call(finance.income_statement, period="year", dropna=True)
-        except Exception as e:
-            err = str(e)
-            if "'data'" in err:
-                log(f"❌ FA income lỗi {ticker}: thiếu 'data' | raw error: {err}")
-            else:
-                log(f"⚠️ FA income lỗi {ticker}: {err}")
-            income_df = None
+        income_df = _vns_call(finance.income_statement, period="year", dropna=True)
 
         if income_df is not None and not income_df.empty:
             income_df = income_df.tail(4).copy()
@@ -376,7 +364,6 @@ def get_fa_data(ticker: str) -> Dict:
 
         result["fa_quality_score"] = score
 
-        # Có ít nhất 1 dữ liệu FA thì xem là ok
         result["fa_ok"] = any([
             result["eps"] is not None,
             result["roe"] is not None,
@@ -385,28 +372,41 @@ def get_fa_data(ticker: str) -> Dict:
             result["latest_net_profit"] is not None,
         ])
 
-    except Exception as e:
-        err = str(e)
-        result["fa_error"] = err
-    
-        if "'data'" in err or err == "data":
-            log(f"❌ FA lỗi {ticker}: thiếu key 'data' ngay khi gọi finance API | raw error={err}")
-        else:
-            log(f"❌ FA lỗi {ticker}: {err}")
+        return result
 
-    # Chỉ cache nếu có dữ liệu FA thật
-    if result["fa_ok"]:
-        cache_all[ticker] = result
-        cache_save(FA_CACHE_FILE, cache_all)
-    else:
-        err = str(result.get("fa_error") or "")
-        if "'data'" in err or err == "data":
-            log(f"⚠️ FA thiếu dữ liệu {ticker}: lỗi key 'data' từ vnstock/API")
-        else:
-            log(f"⚠️ FA thiếu dữ liệu {ticker}: {err}")
+    # ========================================================
+    # FALLBACK FLOW: VCI -> TCBS -> FA None
+    # ========================================================
+    errors = []
 
-    return result
+    for source in ["VCI", "TCBS"]:
+        try:
+            fa = read_fa_from_source(source)
 
+            if fa.get("fa_ok"):
+                log(f"✅ FA {ticker}: lấy được từ {source}")
+                cache_all[ticker] = fa
+                cache_save(FA_CACHE_FILE, cache_all)
+                return fa
+
+            errors.append(f"{source}: empty FA")
+
+        except Exception as e:
+            err = str(e)
+            errors.append(f"{source}: {err}")
+
+            if err == "data" or "'data'" in err:
+                log(f"⚠️ FA {ticker}: {source} lỗi thiếu key 'data' -> thử nguồn khác")
+            else:
+                log(f"⚠️ FA {ticker}: {source} lỗi {err} -> thử nguồn khác")
+
+            continue
+
+    # Nếu cả VCI và TCBS đều fail
+    final_error = " | ".join(errors)
+    log(f"⚠️ FA {ticker}: cả VCI/TCBS đều lỗi hoặc rỗng -> dùng FA rỗng | {final_error}")
+
+    return empty_fa(source_used=None, error=final_error)
 
 def get_market_regime() -> Tuple[int, str, str]:
     try:
