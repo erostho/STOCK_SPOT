@@ -307,7 +307,13 @@ def get_fa_data(ticker: str) -> Dict:
         finance = stock.finance
 
         # ---------- RATIO ----------
-        ratio_df = _vns_call(finance.ratio, period="year", lang="vi", dropna=True)
+        try:
+            ratio_df = _vns_call(finance.ratio, period="year", lang="vi", dropna=True)
+        except TypeError as e:
+            if "unexpected keyword argument 'lang'" in str(e):
+                ratio_df = _vns_call(finance.ratio, period="year", dropna=True)
+            else:
+                raise
 
         if ratio_df is not None and not ratio_df.empty:
             row = ratio_df.iloc[-1]
