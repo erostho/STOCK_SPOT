@@ -199,7 +199,34 @@ def _find_col(df: pd.DataFrame, keywords: List[str]) -> Optional[str]:
             return col
     return None
 
+def _finance_call(fn, *args, **kwargs):
+    """
+    Gọi finance API linh hoạt vì mỗi source VCI/KBS nhận tham số khác nhau.
+    Nếu source không nhận lang/dropna thì tự bỏ ra và gọi lại.
+    """
+    try_kwargs = dict(kwargs)
 
+    for _ in range(4):
+        try:
+            return _vns_call(fn, *args, **try_kwargs)
+        except TypeError as e:
+            err = str(e)
+
+            if "unexpected keyword argument 'lang'" in err and "lang" in try_kwargs:
+                try_kwargs.pop("lang", None)
+                continue
+
+            if "unexpected keyword argument 'dropna'" in err and "dropna" in try_kwargs:
+                try_kwargs.pop("dropna", None)
+                continue
+
+            if "unexpected keyword argument 'period'" in err and "period" in try_kwargs:
+                try_kwargs.pop("period", None)
+                continue
+
+            raise
+
+    return _vns_call(fn, *args, **try_kwargs)
 def _vns_call(fn, *args, retries: int = 2, **kwargs):
     last_error = None
     for attempt in range(retries + 1):
@@ -308,7 +335,7 @@ def get_fa_data(ticker: str) -> Dict:
 
         # ---------- RATIO ----------
         try:
-            ratio_df = _vns_call(finance.ratio, period="year", lang="vi", dropna=True)
+            ratio_df = _finance_call(finance.ratio, period="year", lang="vi", dropna=True)
         except TypeError as e:
             if "unexpected keyword argument 'lang'" in str(e):
                 ratio_df = _vns_call(finance.ratio, period="year", dropna=True)
@@ -336,7 +363,7 @@ def get_fa_data(ticker: str) -> Dict:
                 result["de"] = _safe_float(row.get(de_col))
 
         # ---------- INCOME ----------
-        income_df = _vns_call(finance.income_statement, period="year", dropna=True)
+        income_df = _finance_call(finance.income_statement, period="year", lang="vi", dropna=True)
 
         if income_df is not None and not income_df.empty:
             income_df = income_df.tail(4).copy()
