@@ -334,13 +334,7 @@ def get_fa_data(ticker: str) -> Dict:
         finance = stock.finance
 
         # ---------- RATIO ----------
-        try:
-            ratio_df = _finance_call(finance.ratio, period="year", lang="vi", dropna=True)
-        except TypeError as e:
-            if "unexpected keyword argument 'lang'" in str(e):
-                ratio_df = _vns_call(finance.ratio, period="year", dropna=True)
-            else:
-                raise
+        ratio_df = _vns_call(finance.ratio, period="year", lang="vi", dropna=True)
 
         if ratio_df is not None and not ratio_df.empty:
             row = ratio_df.iloc[-1]
@@ -363,7 +357,7 @@ def get_fa_data(ticker: str) -> Dict:
                 result["de"] = _safe_float(row.get(de_col))
 
         # ---------- INCOME ----------
-        income_df = _finance_call(finance.income_statement, period="year", lang="vi", dropna=True)
+        income_df = _vns_call(finance.income_statement, period="year", dropna=True)
 
         if income_df is not None and not income_df.empty:
             income_df = income_df.tail(4).copy()
@@ -435,7 +429,7 @@ def get_fa_data(ticker: str) -> Dict:
 
             continue
 
-    # Nếu cả VCI/KBS/FMP đều fail
+    # Nếu cả VCI và KBS, FMP đều fail
     final_error = " | ".join(errors)
     log(f"⚠️ FA {ticker}: cả VCI/KBS/FMP đều lỗi hoặc rỗng -> dùng FA rỗng | {final_error}")
 
