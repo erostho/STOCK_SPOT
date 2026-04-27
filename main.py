@@ -9,7 +9,7 @@ import pandas as pd
 import requests
 import ta
 from vnstock import Vnstock, Quote, register_user
-from vnstock import stock_financial_ratio, financial_report
+
 # ============================================================
 # WEEKLY STOCK WATCHLIST BOT
 # - Nguồn universe: Google Sheet CSV (SHEET_CSV_URL)
