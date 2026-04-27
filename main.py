@@ -50,6 +50,11 @@ PRICE_TTL_SEC = 24 * 3600
 FA_TTL_SEC = 7 * 24 * 3600
 UNIVERSE_TTL_SEC = 24 * 3600
 
+MIN_SCORE_PENNY = float(os.getenv("MIN_SCORE_PENNY", "5.5"))
+MIN_SCORE_SHORT = float(os.getenv("MIN_SCORE_SHORT", "7.0"))
+MIN_SCORE_LONG = float(os.getenv("MIN_SCORE_LONG", "7.0"))
+
+MAX_ITEMS_PER_BUCKET = int(os.getenv("MAX_ITEMS_PER_BUCKET", "15"))
 PENNY_MAX_PRICE = 15_000
 SHORT_MAX_PRICE = 100_000
 LONG_MAX_PRICE = 100_000
@@ -1335,7 +1340,31 @@ def _fmt_num(v, digits=2):
         return f"{float(v):,.{digits}f}".replace(",", "_").replace(".", ",").replace("_", ".")
     except Exception:
         return str(v)
+        
+def apply_tier(x: Dict) -> Dict:
+    score = x.get("score", 0) or 0
 
+    if score >= 8.5:
+        tier = "A+"
+        tier_label = "Rất đáng tiền"
+    elif score >= 7.0:
+        tier = "A"
+        tier_label = "Ổn"
+    else:
+        tier = "B"
+        tier_label = "Theo dõi"
+
+    return {
+        **x,
+        "tier": tier,
+        "tier_label": tier_label,
+    }
+
+
+def filter_rank_bucket(items: List[Optional[Dict]], min_score: float, max_items: int = MAX_ITEMS_PER_BUCKET) -> List[Dict]:
+    clean = [apply_tier(x) for x in items if x and (x.get("score", 0) or 0) >= min_score]
+    clean.sort(key=lambda x: x.get("score", 0), reverse=True)
+    return clean[:max_items]
 
 def format_weekly_message(penny: List[Dict], short: List[Dict], long_: List[Dict], regime_label: str, market_comment: str) -> str:
     today = datetime.now()
@@ -1369,6 +1398,7 @@ def format_weekly_message(penny: List[Dict], short: List[Dict], long_: List[Dict
 
             lines.extend([
                 f"{i}. {x['ticker']} — Giá: {_fmt_num(x['price'])} — Điểm: {_fmt_num(x['score'], 1)}/10",
+                f"   🏷 Xếp hạng: {x.get('tier', 'B')} - {x.get('tier_label', 'Theo dõi')}",
                 f"   🎯 Nhóm: {x.get('label', 'Theo dõi')}",
                 f"   ✅ Lý do:",
                 f"   - {r1}",
@@ -1401,6 +1431,7 @@ def format_weekly_message(penny: List[Dict], short: List[Dict], long_: List[Dict
 
             lines.extend([
                 f"{i}. {x['ticker']} — Giá: {_fmt_num(x['price'])} — Điểm: {_fmt_num(x['score'], 1)}/10",
+                f"   🏷 Xếp hạng: {x.get('tier', 'B')} - {x.get('tier_label', 'Theo dõi')}",
                 f"   🚀 Setup: {x.get('setup_type', 'Theo dõi ngắn hạn')}",
                 f"   ✅ Lý do:",
                 f"   - {r1}",
@@ -1434,6 +1465,7 @@ def format_weekly_message(penny: List[Dict], short: List[Dict], long_: List[Dict
 
             lines.extend([
                 f"{i}. {x['ticker']} — Giá: {_fmt_num(x['price'])} — Điểm: {_fmt_num(x['score'], 1)}/10",
+                f"   🏷 Xếp hạng: {x.get('tier', 'B')} - {x.get('tier_label', 'Theo dõi')}",
                 f"   🏦 Luận điểm đầu tư: {x.get('investment_case', 'Tích lũy dài hạn')}",
                 f"   ✅ Điểm mạnh:",
                 f"   - {r1}",
@@ -1682,23 +1714,18 @@ def run_scan():
                     "risk_note": "Chưa phải lựa chọn dài hạn mạnh, phù hợp theo dõi thêm hơn là giải ngân lớn ngay.",
                 })
 
-    penny = sorted([x for x in penny if x], key=lambda x: x["score"], reverse=True)
-    short = sorted([x for x in short if x], key=lambda x: x["score"], reverse=True)
-    long_ = sorted([x for x in long_ if x], key=lambda x: x["score"], reverse=True)
-
-    if len(penny) < TOP_N_PER_BUCKET:
-        penny_near = sorted(penny_near, key=lambda x: x["score"], reverse=True)
-        need = TOP_N_PER_BUCKET - len(penny)
-        penny.extend(penny_near[:need])
-
-    if len(long_) < TOP_N_PER_BUCKET:
-        long_near = sorted(long_near, key=lambda x: x["score"], reverse=True)
-        need = TOP_N_PER_BUCKET - len(long_)
-        long_.extend(long_near[:need])
-
-    penny = penny[:TOP_N_PER_BUCKET]
-    short = short[:TOP_N_PER_BUCKET]
-    long_ = long_[:TOP_N_PER_BUCKET]
+    # Không lấy TOP 5 cứng nữa.
+    # Chỉ lấy mã đạt điểm tối thiểu, rồi phân tầng A+/A/B.
+    penny = filter_rank_bucket(penny, MIN_SCORE_PENNY)
+    short = filter_rank_bucket(short, MIN_SCORE_SHORT)
+    long_ = filter_rank_bucket(long_, MIN_SCORE_LONG)
+    
+    # Nếu muốn nhóm penny vẫn có danh sách theo dõi B, có thể dùng near-pass nhưng chỉ khi đạt điểm tối thiểu penny.
+    if not penny:
+        penny = filter_rank_bucket(penny_near, MIN_SCORE_PENNY)
+    
+    # Long không ép lấp danh sách nữa.
+    # Mã không đạt chuẩn thì không đưa vào ranking.
 
     msg = format_weekly_message(penny, short, long_, regime_label, market_comment)
     print(msg)
