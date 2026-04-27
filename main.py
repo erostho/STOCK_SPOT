@@ -5,6 +5,7 @@ import time
 from collections import deque
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
+
 import pandas as pd
 import requests
 import ta
@@ -265,83 +266,7 @@ def get_price_history(ticker: str, length: int = PRICE_HISTORY_BARS) -> pd.DataF
     cache_save(PRICE_CACHE_FILE, cache_all)
     return df
 
-def get_fa_data_tcbs_legacy(ticker: str) -> Dict:
-    result = {
-        "ticker": ticker,
-        "eps": None,
-        "roe": None,
-        "pe": None,
-        "pb": None,
-        "de": None,
-        "rev_growth": None,
-        "np_growth": None,
-        "latest_net_profit": None,
-        "fa_quality_score": 0,
-        "fa_ok": False,
-        "fa_source": "TCBS_LEGACY",
-        "fa_error": None,
-    }
 
-    try:
-        ratio_df = _vns_call(stock_financial_ratio, symbol=ticker, report_range="yearly", is_all=False, retries=0)
-
-        if ratio_df is not None and not ratio_df.empty:
-            row = ratio_df.iloc[-1]
-            result["eps"] = _safe_float(row.get(_find_col(ratio_df, ["eps"])))
-            result["roe"] = _safe_float(row.get(_find_col(ratio_df, ["roe"])))
-            result["pe"] = _safe_float(row.get(_find_col(ratio_df, ["pe", "p/e"])))
-            result["pb"] = _safe_float(row.get(_find_col(ratio_df, ["pb", "p/b"])))
-            result["de"] = _safe_float(row.get(_find_col(ratio_df, ["debttoequity", "debt/equity", "d/e", "nợ/vốn"])))
-
-    except Exception as e:
-        result["fa_error"] = f"TCBS ratio: {e}"
-
-    try:
-        income_df = _vns_call(financial_report, symbol=ticker, report_type="IncomeStatement", frequency="Yearly", retries=0)
-
-        if income_df is not None and not income_df.empty:
-            income_df = income_df.tail(4).copy()
-            np_col = _find_col(income_df, ["lnst", "loinhuansauthue", "netprofit", "profitaftertax"])
-            rev_col = _find_col(income_df, ["doanhthu", "revenue", "sales"])
-
-            if np_col:
-                np_list = pd.to_numeric(income_df[np_col], errors="coerce").dropna().tolist()
-                if np_list:
-                    result["latest_net_profit"] = _safe_float(np_list[-1])
-                if len(np_list) >= 2 and np_list[-2] not in [0, None]:
-                    result["np_growth"] = ((np_list[-1] - np_list[-2]) / abs(np_list[-2])) * 100
-
-            if rev_col:
-                rev_list = pd.to_numeric(income_df[rev_col], errors="coerce").dropna().tolist()
-                if len(rev_list) >= 2 and rev_list[-2] not in [0, None]:
-                    result["rev_growth"] = ((rev_list[-1] - rev_list[-2]) / abs(rev_list[-2])) * 100
-
-    except Exception as e:
-        old = result.get("fa_error")
-        result["fa_error"] = f"{old}; TCBS income: {e}" if old else f"TCBS income: {e}"
-
-    score = 0
-    if result["eps"] is not None and result["eps"] > 0:
-        score += 1
-    if result["roe"] is not None and result["roe"] >= 10:
-        score += 1
-    if result["pe"] is not None and 0 < result["pe"] < 18:
-        score += 1
-    if result["de"] is not None and result["de"] < 1.5:
-        score += 1
-    if result["np_growth"] is not None and result["np_growth"] > 0:
-        score += 1
-
-    result["fa_quality_score"] = score
-    result["fa_ok"] = any([
-        result["eps"] is not None,
-        result["roe"] is not None,
-        result["pe"] is not None,
-        result["pb"] is not None,
-        result["latest_net_profit"] is not None,
-    ])
-
-    return result
 def get_fa_data(ticker: str) -> Dict:
     cache_all = cache_load(FA_CACHE_FILE, FA_TTL_SEC) or {}
     if ticker in cache_all:
@@ -443,24 +368,33 @@ def get_fa_data(ticker: str) -> Dict:
     # CHỈ dùng source thực tế còn khả dụng trên Render
     for source in ["VCI", "KBS"]:
         try:
-            fa = read_fa_from_source("VCI")
+            fa = read_fa_from_source(source)
+
             if fa.get("fa_ok"):
-                log(f"✅ FA {ticker}: lấy được từ VCI")
+                log(f"✅ FA {ticker}: lấy được từ {source}")
                 cache_all[ticker] = fa
                 cache_save(FA_CACHE_FILE, cache_all)
                 return fa
+
+            errors.append(f"{source}: empty FA")
+
         except Exception as e:
-            log(f"⚠️ FA {ticker}: VCI lỗi {e} -> thử TCBS legacy")
-        
-        fa = get_fa_data_tcbs_legacy(ticker)
-        if fa.get("fa_ok"):
-            log(f"✅ FA {ticker}: lấy được từ TCBS legacy")
-            cache_all[ticker] = fa
-            cache_save(FA_CACHE_FILE, cache_all)
-            return fa
-        
-        log(f"⚠️ FA {ticker}: không lấy được FA từ VCI/TCBS legacy | {fa.get('fa_error')}")
-        return fa
+            err = str(e)
+            errors.append(f"{source}: {err}")
+
+            if err == "data" or "'data'" in err:
+                log(f"⚠️ FA {ticker}: {source} lỗi thiếu key 'data'")
+            elif "404" in err:
+                log(f"⚠️ FA {ticker}: {source} không có endpoint FA / 404")
+            else:
+                log(f"⚠️ FA {ticker}: {source} lỗi {err}")
+
+            continue
+
+    final_error = " | ".join(errors)
+    log(f"⚠️ FA {ticker}: không lấy được FA từ VCI/KBS -> dùng FA rỗng | {final_error}")
+
+    return empty_fa(source_used=None, error=final_error)
 
 
 def get_market_regime() -> Tuple[int, str, str]:
