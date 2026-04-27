@@ -280,22 +280,49 @@ def get_fa_data(ticker: str) -> Dict:
         "np_growth": None,
         "latest_net_profit": None,
         "fa_quality_score": 0,
+        "fa_ok": False,
+        "fa_error": None,
     }
 
     try:
         stock = Vnstock().stock(symbol=ticker, source="VCI")
         finance = stock.finance
 
-        ratio_df = _vns_call(finance.ratio, period="year", lang="vi", dropna=True)
+        # ---------- RATIO ----------
+        try:
+            ratio_df = _vns_call(finance.ratio, period="year", lang="vi", dropna=True)
+        except Exception as e:
+            ratio_df = None
+            result["fa_error"] = f"ratio: {e}"
+
         if ratio_df is not None and not ratio_df.empty:
             row = ratio_df.iloc[-1]
-            result["eps"] = _safe_float(row.get(_find_col(ratio_df, ["eps"])))
-            result["roe"] = _safe_float(row.get(_find_col(ratio_df, ["roe"])))
-            result["pe"] = _safe_float(row.get(_find_col(ratio_df, ["p/e", "pe"])))
-            result["pb"] = _safe_float(row.get(_find_col(ratio_df, ["p/b", "pb"])))
-            result["de"] = _safe_float(row.get(_find_col(ratio_df, ["nợ/vốn", "debttoequity", "debt/equity", "d/e"])))
 
-        income_df = _vns_call(finance.income_statement, period="year", dropna=True)
+            eps_col = _find_col(ratio_df, ["eps"])
+            roe_col = _find_col(ratio_df, ["roe"])
+            pe_col = _find_col(ratio_df, ["p/e", "pe"])
+            pb_col = _find_col(ratio_df, ["p/b", "pb"])
+            de_col = _find_col(ratio_df, ["nợ/vốn", "debttoequity", "debt/equity", "d/e"])
+
+            if eps_col:
+                result["eps"] = _safe_float(row.get(eps_col))
+            if roe_col:
+                result["roe"] = _safe_float(row.get(roe_col))
+            if pe_col:
+                result["pe"] = _safe_float(row.get(pe_col))
+            if pb_col:
+                result["pb"] = _safe_float(row.get(pb_col))
+            if de_col:
+                result["de"] = _safe_float(row.get(de_col))
+
+        # ---------- INCOME ----------
+        try:
+            income_df = _vns_call(finance.income_statement, period="year", dropna=True)
+        except Exception as e:
+            income_df = None
+            old_err = result.get("fa_error")
+            result["fa_error"] = f"{old_err}; income: {e}" if old_err else f"income: {e}"
+
         if income_df is not None and not income_df.empty:
             income_df = income_df.tail(4).copy()
             np_col = _find_col(income_df, ["lnst", "loinhuansauthue", "netprofit"])
@@ -307,30 +334,47 @@ def get_fa_data(ticker: str) -> Dict:
                     result["latest_net_profit"] = _safe_float(np_list[-1])
                 if len(np_list) >= 2 and np_list[-2] not in [0, None]:
                     result["np_growth"] = ((np_list[-1] - np_list[-2]) / abs(np_list[-2])) * 100
+
             if rev_col:
                 rev_list = pd.to_numeric(income_df[rev_col], errors="coerce").dropna().tolist()
                 if len(rev_list) >= 2 and rev_list[-2] not in [0, None]:
                     result["rev_growth"] = ((rev_list[-1] - rev_list[-2]) / abs(rev_list[-2])) * 100
 
-        # FA quality score nhẹ, dùng cho ranking
+        # ---------- FA QUALITY ----------
         score = 0
-        if result["eps"] and result["eps"] > 0:
+        if result["eps"] is not None and result["eps"] > 0:
             score += 1
-        if result["roe"] and result["roe"] >= 10:
+        if result["roe"] is not None and result["roe"] >= 10:
             score += 1
-        if result["pe"] and 0 < result["pe"] < 18:
+        if result["pe"] is not None and 0 < result["pe"] < 18:
             score += 1
         if result["de"] is not None and result["de"] < 1.5:
             score += 1
         if result["np_growth"] is not None and result["np_growth"] > 0:
             score += 1
+
         result["fa_quality_score"] = score
 
-    except Exception as e:
-        log(f"⚠️ FA lỗi {ticker}: {e}")
+        # Có ít nhất 1 dữ liệu FA thì xem là ok
+        result["fa_ok"] = any([
+            result["eps"] is not None,
+            result["roe"] is not None,
+            result["pe"] is not None,
+            result["pb"] is not None,
+            result["latest_net_profit"] is not None,
+        ])
 
-    cache_all[ticker] = result
-    cache_save(FA_CACHE_FILE, cache_all)
+    except Exception as e:
+        result["fa_error"] = str(e)
+
+    # Chỉ cache nếu có dữ liệu FA thật
+    if result["fa_ok"]:
+        cache_all[ticker] = result
+        cache_save(FA_CACHE_FILE, cache_all)
+    else:
+        # Không spam từng mã nữa, chỉ log nhẹ
+        log(f"⚠️ FA thiếu dữ liệu {ticker}: {result.get('fa_error')}")
+
     return result
 
 
