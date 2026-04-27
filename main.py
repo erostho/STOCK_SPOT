@@ -57,21 +57,7 @@ LONG_LIQ_MIN = 3e9
 # ---------- batch scan ----------
 BATCH_SIZE = int(os.getenv("STOCK_SCAN_BATCH_SIZE", "510"))
 BATCH_DELAY_SEC = int(os.getenv("STOCK_SCAN_BATCH_DELAY_SEC", "90"))
-DEBUG_FA = os.getenv("DEBUG_FA", "0").strip() == "1"
-DEBUG_SCORE = os.getenv("DEBUG_SCORE", "0").strip() == "1"
-DEBUG_TICKERS = set(
-    x.strip().upper()
-    for x in os.getenv("DEBUG_TICKERS", "").split(",")
-    if x.strip()
-)
 
-def should_debug_ticker(ticker: str) -> bool:
-    ticker = str(ticker).upper().strip()
-    return DEBUG_FA or DEBUG_SCORE or ticker in DEBUG_TICKERS
-
-def debug_log(ticker: str, msg: str):
-    if should_debug_ticker(ticker):
-        log(f"🧪 DEBUG {ticker}: {msg}")
 def log(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -199,34 +185,7 @@ def _find_col(df: pd.DataFrame, keywords: List[str]) -> Optional[str]:
             return col
     return None
 
-def _finance_call(fn, *args, **kwargs):
-    """
-    Gọi finance API linh hoạt vì mỗi source VCI/KBS nhận tham số khác nhau.
-    Nếu source không nhận lang/dropna thì tự bỏ ra và gọi lại.
-    """
-    try_kwargs = dict(kwargs)
 
-    for _ in range(4):
-        try:
-            return _vns_call(fn, *args, **try_kwargs)
-        except TypeError as e:
-            err = str(e)
-
-            if "unexpected keyword argument 'lang'" in err and "lang" in try_kwargs:
-                try_kwargs.pop("lang", None)
-                continue
-
-            if "unexpected keyword argument 'dropna'" in err and "dropna" in try_kwargs:
-                try_kwargs.pop("dropna", None)
-                continue
-
-            if "unexpected keyword argument 'period'" in err and "period" in try_kwargs:
-                try_kwargs.pop("period", None)
-                continue
-
-            raise
-
-    return _vns_call(fn, *args, **try_kwargs)
 def _vns_call(fn, *args, retries: int = 2, **kwargs):
     last_error = None
     for attempt in range(retries + 1):
@@ -429,11 +388,12 @@ def get_fa_data(ticker: str) -> Dict:
 
             continue
 
-    # Nếu cả VCI và KBS, FMP đều fail
+    # Nếu cả VCI/KBS/FMP đều fail
     final_error = " | ".join(errors)
     log(f"⚠️ FA {ticker}: cả VCI/KBS/FMP đều lỗi hoặc rỗng -> dùng FA rỗng | {final_error}")
 
     return empty_fa(source_used=None, error=final_error)
+
 
 def get_market_regime() -> Tuple[int, str, str]:
     try:
