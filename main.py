@@ -202,28 +202,7 @@ def _vns_call(fn, *args, retries: int = 2, **kwargs):
                 time.sleep(sleep_s)
     raise last_error
 
-def _finance_call_flexible(fn):
-    """
-    Gọi finance API theo nhiều kiểu vì mỗi source VCI/KBS nhận tham số khác nhau.
-    Giữ nguyên FA, nhưng tránh lỗi lang/dropna/period.
-    """
-    variants = [
-        {"period": "year", "lang": "vi", "dropna": True},
-        {"period": "year", "dropna": True},
-        {"period": "year"},
-        {},
-    ]
 
-    last_error = None
-
-    for kwargs in variants:
-        try:
-            return _vns_call(fn, retries=0, **kwargs)
-        except Exception as e:
-            last_error = e
-            continue
-
-    raise last_error
     
 def get_price_history(ticker: str, length: int = PRICE_HISTORY_BARS) -> pd.DataFrame:
     cache_all = cache_load(PRICE_CACHE_FILE, PRICE_TTL_SEC) or {}
@@ -317,7 +296,7 @@ def get_fa_data(ticker: str) -> Dict:
         finance = stock.finance
 
         # ---------- RATIO ----------
-        ratio_df = _finance_call_flexible(finance.ratio)
+        ratio_df = _vns_call(finance.ratio, period="year", retries=0)
 
         if ratio_df is not None and not ratio_df.empty:
             row = ratio_df.iloc[-1]
@@ -340,7 +319,7 @@ def get_fa_data(ticker: str) -> Dict:
                 result["de"] = _safe_float(row.get(de_col))
 
         # ---------- INCOME ----------
-        income_df = _finance_call_flexible(finance.income_statement)
+        income_df = _vns_call(finance.income_statement, period="year", retries=0)
 
         if income_df is not None and not income_df.empty:
             income_df = income_df.tail(4).copy()
