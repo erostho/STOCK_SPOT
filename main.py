@@ -5,12 +5,14 @@ import time
 from collections import deque
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
-
 import pandas as pd
 import requests
 import ta
 from vnstock import Vnstock, Quote, register_user
-
+try:
+    from vnstock_data import Fundamental
+except Exception:
+    Fundamental = None
 # ============================================================
 # WEEKLY STOCK WATCHLIST BOT
 # - Nguồn universe: Google Sheet CSV (SHEET_CSV_URL)
@@ -266,64 +268,44 @@ def get_price_history(ticker: str, length: int = PRICE_HISTORY_BARS) -> pd.DataF
     cache_save(PRICE_CACHE_FILE, cache_all)
     return df
 
+def get_fa_data_vnstock_data(ticker: str) -> Dict:
+    result = {
+        "ticker": ticker,
+        "eps": None,
+        "roe": None,
+        "pe": None,
+        "pb": None,
+        "de": None,
+        "rev_growth": None,
+        "np_growth": None,
+        "latest_net_profit": None,
+        "fa_quality_score": 0,
+        "fa_ok": False,
+        "fa_source": "vnstock_data",
+        "fa_error": None,
+    }
 
-def get_fa_data(ticker: str) -> Dict:
-    cache_all = cache_load(FA_CACHE_FILE, FA_TTL_SEC) or {}
-    if ticker in cache_all:
-        return cache_all[ticker]
+    if Fundamental is None:
+        result["fa_error"] = "vnstock_data not installed"
+        return result
 
-    def empty_fa(source_used=None, error=None) -> Dict:
-        return {
-            "ticker": ticker,
-            "eps": None,
-            "roe": None,
-            "pe": None,
-            "pb": None,
-            "de": None,
-            "rev_growth": None,
-            "np_growth": None,
-            "latest_net_profit": None,
-            "fa_quality_score": 0,
-            "fa_ok": False,
-            "fa_source": source_used,
-            "fa_error": error,
-        }
+    try:
+        fun = Fundamental()
+        eq = fun.equity(symbol=ticker)
 
-    def read_fa_from_source(source: str) -> Dict:
-        result = empty_fa(source_used=source, error=None)
-
-        stock = Vnstock().stock(symbol=ticker, source=source)
-        finance = stock.finance
-
-        # ---------- RATIO ----------
-        ratio_df = _vns_call(finance.ratio, period="year", retries=0)
-
+        ratio_df = eq.ratio(period="year")
         if ratio_df is not None and not ratio_df.empty:
             row = ratio_df.iloc[-1]
+            result["eps"] = _safe_float(row.get(_find_col(ratio_df, ["eps"])))
+            result["roe"] = _safe_float(row.get(_find_col(ratio_df, ["roe"])))
+            result["pe"] = _safe_float(row.get(_find_col(ratio_df, ["pe", "p/e"])))
+            result["pb"] = _safe_float(row.get(_find_col(ratio_df, ["pb", "p/b"])))
+            result["de"] = _safe_float(row.get(_find_col(ratio_df, ["debttoequity", "debt/equity", "d/e", "nợ/vốn"])))
 
-            eps_col = _find_col(ratio_df, ["eps"])
-            roe_col = _find_col(ratio_df, ["roe"])
-            pe_col = _find_col(ratio_df, ["p/e", "pe"])
-            pb_col = _find_col(ratio_df, ["p/b", "pb"])
-            de_col = _find_col(ratio_df, ["nợ/vốn", "debttoequity", "debt/equity", "d/e"])
-
-            if eps_col:
-                result["eps"] = _safe_float(row.get(eps_col))
-            if roe_col:
-                result["roe"] = _safe_float(row.get(roe_col))
-            if pe_col:
-                result["pe"] = _safe_float(row.get(pe_col))
-            if pb_col:
-                result["pb"] = _safe_float(row.get(pb_col))
-            if de_col:
-                result["de"] = _safe_float(row.get(de_col))
-
-        # ---------- INCOME ----------
-        income_df = _vns_call(finance.income_statement, period="year", retries=0)
-
+        income_df = eq.income_statement(period="year")
         if income_df is not None and not income_df.empty:
             income_df = income_df.tail(4).copy()
-            np_col = _find_col(income_df, ["lnst", "loinhuansauthue", "netprofit"])
+            np_col = _find_col(income_df, ["lnst", "loinhuansauthue", "netprofit", "profitaftertax"])
             rev_col = _find_col(income_df, ["doanhthu", "revenue", "sales"])
 
             if np_col:
@@ -338,7 +320,6 @@ def get_fa_data(ticker: str) -> Dict:
                 if len(rev_list) >= 2 and rev_list[-2] not in [0, None]:
                     result["rev_growth"] = ((rev_list[-1] - rev_list[-2]) / abs(rev_list[-2])) * 100
 
-        # ---------- FA QUALITY ----------
         score = 0
         if result["eps"] is not None and result["eps"] > 0:
             score += 1
@@ -352,7 +333,6 @@ def get_fa_data(ticker: str) -> Dict:
             score += 1
 
         result["fa_quality_score"] = score
-
         result["fa_ok"] = any([
             result["eps"] is not None,
             result["roe"] is not None,
@@ -363,39 +343,25 @@ def get_fa_data(ticker: str) -> Dict:
 
         return result
 
-    errors = []
+    except Exception as e:
+        result["fa_error"] = str(e)
+        return result
+        
+def get_fa_data(ticker: str) -> Dict:
+    cache_all = cache_load(FA_CACHE_FILE, FA_TTL_SEC) or {}
+    if ticker in cache_all:
+        return cache_all[ticker]
 
-    # CHỈ dùng source thực tế còn khả dụng trên Render
-    for source in ["VCI", "KBS"]:
-        try:
-            fa = read_fa_from_source(source)
+    fa = get_fa_data_vnstock_data(ticker)
 
-            if fa.get("fa_ok"):
-                log(f"✅ FA {ticker}: lấy được từ {source}")
-                cache_all[ticker] = fa
-                cache_save(FA_CACHE_FILE, cache_all)
-                return fa
+    if fa.get("fa_ok"):
+        log(f"✅ FA {ticker}: lấy được từ vnstock_data")
+        cache_all[ticker] = fa
+        cache_save(FA_CACHE_FILE, cache_all)
+        return fa
 
-            errors.append(f"{source}: empty FA")
-
-        except Exception as e:
-            err = str(e)
-            errors.append(f"{source}: {err}")
-
-            if err == "data" or "'data'" in err:
-                log(f"⚠️ FA {ticker}: {source} lỗi thiếu key 'data'")
-            elif "404" in err:
-                log(f"⚠️ FA {ticker}: {source} không có endpoint FA / 404")
-            else:
-                log(f"⚠️ FA {ticker}: {source} lỗi {err}")
-
-            continue
-
-    final_error = " | ".join(errors)
-    log(f"⚠️ FA {ticker}: không lấy được FA từ VCI/KBS -> dùng FA rỗng | {final_error}")
-
-    return empty_fa(source_used=None, error=final_error)
-
+    log(f"⚠️ FA {ticker}: vnstock_data lỗi/rỗng: {fa.get('fa_error')}")
+    return fa
 
 def get_market_regime() -> Tuple[int, str, str]:
     try:
