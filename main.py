@@ -50,11 +50,14 @@ PRICE_TTL_SEC = 24 * 3600
 FA_TTL_SEC = 7 * 24 * 3600
 UNIVERSE_TTL_SEC = 24 * 3600
 
-MIN_SCORE_PENNY = float(os.getenv("MIN_SCORE_PENNY", "5.5"))
-MIN_SCORE_SHORT = float(os.getenv("MIN_SCORE_SHORT", "7.0"))
-MIN_SCORE_LONG = float(os.getenv("MIN_SCORE_LONG", "7.0"))
+MIN_SCORE_PENNY = float(os.getenv("MIN_SCORE_PENNY", "5.0"))
+MIN_SCORE_SHORT = float(os.getenv("MIN_SCORE_SHORT", "6.0"))
+MIN_SCORE_LONG = float(os.getenv("MIN_SCORE_LONG", "6.0"))
+FALLBACK_SCORE_PENNY = float(os.getenv("FALLBACK_SCORE_PENNY", "3.5"))
+FALLBACK_SCORE_SHORT = float(os.getenv("FALLBACK_SCORE_SHORT", "4.5"))
+FALLBACK_SCORE_LONG = float(os.getenv("FALLBACK_SCORE_LONG", "4.5"))
 
-MAX_ITEMS_PER_BUCKET = int(os.getenv("MAX_ITEMS_PER_BUCKET", "15"))
+MAX_ITEMS_PER_BUCKET = int(os.getenv("MAX_ITEMS_PER_BUCKET", "10"))
 PENNY_MAX_PRICE = 15_000
 SHORT_MAX_PRICE = 100_000
 LONG_MAX_PRICE = 100_000
@@ -1361,10 +1364,47 @@ def apply_tier(x: Dict) -> Dict:
     }
 
 
-def filter_rank_bucket(items: List[Optional[Dict]], min_score: float, max_items: int = MAX_ITEMS_PER_BUCKET) -> List[Dict]:
-    clean = [apply_tier(x) for x in items if x and (x.get("score", 0) or 0) >= min_score]
+def apply_tier(x: Dict) -> Dict:
+    score = x.get("score", 0) or 0
+
+    if score >= 7.5:
+        tier = "A+"
+        tier_label = "Rất đáng tiền"
+    elif score >= 6.0:
+        tier = "A"
+        tier_label = "Ổn"
+    else:
+        tier = "B"
+        tier_label = "Theo dõi"
+
+    return {
+        **x,
+        "tier": tier,
+        "tier_label": tier_label,
+    }
+
+
+def filter_rank_bucket(
+    items: List[Optional[Dict]],
+    min_score: float,
+    fallback_min_score: float = 4.5,
+    max_items: int = 10
+) -> List[Dict]:
+    clean = [x for x in items if x]
     clean.sort(key=lambda x: x.get("score", 0), reverse=True)
-    return clean[:max_items]
+
+    passed = [apply_tier(x) for x in clean if (x.get("score", 0) or 0) >= min_score]
+
+    # Nếu không có mã A/A+ thì vẫn trả nhóm B để theo dõi,
+    # tránh tuần nào cũng rỗng.
+    if not passed:
+        passed = [
+            apply_tier(x)
+            for x in clean
+            if (x.get("score", 0) or 0) >= fallback_min_score
+        ]
+
+    return passed[:max_items]
 
 def format_weekly_message(penny: List[Dict], short: List[Dict], long_: List[Dict], regime_label: str, market_comment: str) -> str:
     today = datetime.now()
@@ -1716,9 +1756,26 @@ def run_scan():
 
     # Không lấy TOP 5 cứng nữa.
     # Chỉ lấy mã đạt điểm tối thiểu, rồi phân tầng A+/A/B.
-    penny = filter_rank_bucket(penny, MIN_SCORE_PENNY)
-    short = filter_rank_bucket(short, MIN_SCORE_SHORT)
-    long_ = filter_rank_bucket(long_, MIN_SCORE_LONG)
+    penny = filter_rank_bucket(
+        penny + penny_near,
+        MIN_SCORE_PENNY,
+        FALLBACK_SCORE_PENNY,
+        MAX_ITEMS_PER_BUCKET
+    )
+    
+    short = filter_rank_bucket(
+        short,
+        MIN_SCORE_SHORT,
+        FALLBACK_SCORE_SHORT,
+        MAX_ITEMS_PER_BUCKET
+    )
+    
+    long_ = filter_rank_bucket(
+        long_ + long_near,
+        MIN_SCORE_LONG,
+        FALLBACK_SCORE_LONG,
+        MAX_ITEMS_PER_BUCKET
+    )
     
     # Nếu muốn nhóm penny vẫn có danh sách theo dõi B, có thể dùng near-pass nhưng chỉ khi đạt điểm tối thiểu penny.
     if not penny:
